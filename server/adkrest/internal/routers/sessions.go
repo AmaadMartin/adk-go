@@ -58,6 +58,12 @@ func (r *SessionsAPIRouter) Routes() Routes {
 			HandlerFunc: r.sessionController.DeleteSessionHandler,
 		},
 		Route{
+			Name:        "UpdateSession",
+			Methods:     []string{http.MethodPatch},
+			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
+			HandlerFunc: r.sessionController.UpdateSessionHandler,
+		},
+		Route{
 			Name:        "ListSessions",
 			Methods:     []string{http.MethodGet},
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions",

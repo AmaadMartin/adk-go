@@ -55,7 +55,7 @@ func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", frontendAddress)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusOK)
@@ -99,9 +99,9 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	// Instead, attach the handler to the main router directly.
 	if a.config.pathPrefix == "" || a.config.pathPrefix == "/" {
 		// This allows other routes (like /ui/) to match first if registered
-		router.Methods("GET", "POST", "DELETE", "OPTIONS").Handler(corsHandler)
+		router.Methods("GET", "POST", "PATCH", "DELETE", "OPTIONS").Handler(corsHandler)
 	} else {
-		router.Methods("GET", "POST", "DELETE", "OPTIONS").
+		router.Methods("GET", "POST", "PATCH", "DELETE", "OPTIONS").
 			PathPrefix(a.config.pathPrefix).
 			Handler(http.StripPrefix(a.config.pathPrefix, corsHandler))
 	}

@@ -18,11 +18,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/gorilla/mux"
 
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
 )
@@ -134,6 +136,58 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 		return
 	}
 	EncodeJSONResponse(session, http.StatusOK, rw)
+}
+
+// UpdateSessionHandler merges a state delta into a session without running the agent.
+func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(params)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	var updateRequest models.UpdateSessionRequest
+	if err := json.NewDecoder(req.Body).Decode(&updateRequest); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stateDelta := updateRequest.Delta()
+	if stateDelta == nil {
+		http.Error(rw, "stateDelta is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := req.Context()
+	storedSession, err := c.service.Get(ctx, &session.GetRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+	})
+	if err != nil {
+		http.Error(rw, fmt.Errorf("session not found: %w", err).Error(), http.StatusNotFound)
+		return
+	}
+
+	// The "p-" prefix marks a patch event, matching adk-python. The session
+	// service applies Actions.StateDelta when it appends the event.
+	stateUpdateEvent := session.NewEvent(ctx, "p-"+platform.NewUUID(ctx))
+	stateUpdateEvent.Author = "user"
+	stateUpdateEvent.Actions.StateDelta = stateDelta
+	if err := c.service.AppendEvent(ctx, storedSession.Session, stateUpdateEvent); err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	respSession, err := models.FromSession(storedSession.Session)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(respSession, http.StatusOK, rw)
 }
 
 // ListSessionsHandler handles listing all sessions for a given app and user.
