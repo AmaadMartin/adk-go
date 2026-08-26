@@ -40,8 +40,13 @@ type CreateSessionRequest struct {
 
 // UpdateSessionRequest is the body of PATCH …/sessions/{session_id}.
 //
-// adk-python accepts both spellings of the field: its schema advertises
-// stateDelta, but its own shipped client posts state_delta.
+// The schema advertises stateDelta, and every other model in this package is
+// camelCase only. This one endpoint also reads state_delta because adk-python's
+// conformance client hand-writes that spelling, in
+// src/google/adk/cli/conformance/adk_web_server_client.py, where update_session
+// posts json={"state_delta": state_delta}. Every other call it makes is
+// camel-cased by model_dump(by_alias=True), so this is the single place a
+// first-party client would otherwise fail against a Go server.
 type UpdateSessionRequest struct {
 	StateDelta      map[string]any `json:"stateDelta"`
 	StateDeltaAlias map[string]any `json:"state_delta"`

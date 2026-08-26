@@ -15,18 +15,6 @@
 package models
 
 // UpdateMemoryRequest is the body of PATCH /apps/{app_name}/users/{user_id}/memory.
-//
-// adk-python accepts both spellings of the field: its schema advertises
-// sessionId, but its own shipped client posts session_id.
 type UpdateMemoryRequest struct {
-	SessionID      string `json:"sessionId"`
-	SessionIDAlias string `json:"session_id"`
-}
-
-// SessionIDValue returns the session ID under whichever spelling the caller used.
-func (r UpdateMemoryRequest) SessionIDValue() string {
-	if r.SessionID != "" {
-		return r.SessionID
-	}
-	return r.SessionIDAlias
+	SessionID string `json:"sessionId"`
 }

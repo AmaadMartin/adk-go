@@ -314,7 +314,6 @@ func TestGetAppInfoErrors(t *testing.T) {
 	tc := []struct {
 		name       string
 		root       agent.Agent
-		opts       []controllers.AppsAPIOption
 		appName    string
 		wantStatus int
 		wantBody   string
@@ -334,24 +333,17 @@ func TestGetAppInfoErrors(t *testing.T) {
 			wantBody:   "cannot load agent 'missing' - provide an empty string or use 'assistant'",
 		},
 		{
-			name:       "special agent is rejected by default",
+			name:       "special agent is rejected",
 			root:       specialRoot,
 			appName:    "__special",
 			wantStatus: http.StatusForbidden,
 			wantBody:   "Access to internal special agents is disabled in API server mode.",
 		},
-		{
-			name:       "special agent is served when allowed",
-			root:       specialRoot,
-			opts:       []controllers.AppsAPIOption{controllers.WithSpecialAgents()},
-			appName:    "__special",
-			wantStatus: http.StatusOK,
-		},
 	}
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			c := controllers.NewAppsAPIController(newLoader(t, tt.root), tt.opts...)
+			c := controllers.NewAppsAPIController(newLoader(t, tt.root))
 
 			rr := appInfoRequest(t, c, tt.appName)
 

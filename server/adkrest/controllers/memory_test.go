@@ -56,18 +56,10 @@ func TestPatchMemory(t *testing.T) {
 		wantStatus      int
 	}{
 		{
-			name:           "camelCase session ID is remembered",
+			name:           "session ID is remembered",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{id: storedSession},
 			sessionID:      id,
 			body:           `{"sessionId":"testSession"}`,
-			wantAddedIDs:   []string{"testSession"},
-			wantStatus:     http.StatusOK,
-		},
-		{
-			name:           "snake_case session ID is remembered",
-			storedSessions: map[fakes.SessionKey]fakes.TestSession{id: storedSession},
-			sessionID:      id,
-			body:           `{"session_id":"testSession"}`,
 			wantAddedIDs:   []string{"testSession"},
 			wantStatus:     http.StatusOK,
 		},
@@ -97,7 +89,7 @@ func TestPatchMemory(t *testing.T) {
 			wantStatus:     http.StatusBadRequest,
 		},
 		{
-			name:           "session ID is empty",
+			name:           "session ID is absent",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{id: storedSession},
 			sessionID:      id,
 			body:           `{}`,

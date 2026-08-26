@@ -72,8 +72,11 @@ Read the runtime:
 
 ```bash
 curl -s localhost:8099/version
-# {"version":"2.0.0","language":"go","language_version":"1.26.6"}
 ```
+
+The reply carries three keys: `version` is the ADK Go version, `language` is
+always `go`, and `language_version` is the Go toolchain version with its `go`
+prefix removed.
 
 Read the agent tree:
 
@@ -148,22 +151,12 @@ one.
 
 | Request | Response |
 | ------- | -------- |
-| `app-info` for an app name starting with `__` | 403, unless the server sets `AllowSpecialAgents` |
+| `app-info` for an app name starting with `__` | 403; those names are reserved for internal agents |
 | `app-info` for an unknown app | 404 with the loader's error |
 | `app-info` whose root agent is not an LLM agent | 400 |
 | `PATCH` session with a body carrying neither spelling | 400 |
 | `PATCH` session or memory for an unknown session | 404 |
 | `PATCH` memory with no memory service configured | 400 |
-
-`AllowSpecialAgents` opens the `__` namespace:
-
-```go
-server, err := adkrest.NewServer(adkrest.ServerConfig{
-	AgentLoader:        agent.NewSingleLoader(root),
-	SessionService:     session.InMemoryService(),
-	AllowSpecialAgents: true,
-})
-```
 
 ## Serving through adkgo web
 

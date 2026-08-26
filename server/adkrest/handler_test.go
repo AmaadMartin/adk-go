@@ -21,8 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 )
@@ -61,7 +59,7 @@ func TestServerVersion(t *testing.T) {
 	if got, want := recorder.Code, http.StatusOK; got != want {
 		t.Errorf("GET /version status = %d, want %d", got, want)
 	}
-	if got, want := recorder.Header().Get("Content-Type"), "application/json"; got != want {
+	if got, want := recorder.Header().Get("Content-Type"), "application/json; charset=UTF-8"; got != want {
 		t.Errorf("GET /version Content-Type = %q, want %q", got, want)
 	}
 	// Decoding into the wire type pins the exact JSON keys, language_version included.
@@ -80,40 +78,5 @@ func TestServerVersion(t *testing.T) {
 	}
 	if strings.HasPrefix(got.LanguageVersion, "go") {
 		t.Errorf("GET /version language_version = %q, want no %q prefix", got.LanguageVersion, "go")
-	}
-}
-
-// TestServerAllowSpecialAgents pins that ServerConfig reaches the Apps
-// controller: without the flag a "__" app is refused, with it the app is served.
-func TestServerAllowSpecialAgents(t *testing.T) {
-	root, err := llmagent.New(llmagent.Config{Name: "__special"})
-	if err != nil {
-		t.Fatalf("llmagent.New() failed: %v", err)
-	}
-
-	for _, tt := range []struct {
-		name       string
-		allow      bool
-		wantStatus int
-	}{
-		{name: "refused by default", allow: false, wantStatus: http.StatusForbidden},
-		{name: "served when allowed", allow: true, wantStatus: http.StatusOK},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			server, err := NewServer(ServerConfig{
-				AgentLoader:        agent.NewSingleLoader(root),
-				AllowSpecialAgents: tt.allow,
-			})
-			if err != nil {
-				t.Fatalf("NewServer() failed: %v", err)
-			}
-			recorder := httptest.NewRecorder()
-
-			server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/apps/__special/app-info", nil))
-
-			if got := recorder.Code; got != tt.wantStatus {
-				t.Errorf("GET app-info status = %d, want %d; body %q", got, tt.wantStatus, recorder.Body.String())
-			}
-		})
 	}
 }

@@ -49,8 +49,11 @@ func TestBuildAgentsTreeSkipsToolsWithoutDeclaration(t *testing.T) {
 		t.Fatalf("llmagent.New() failed: %v", err)
 	}
 
-	got := services.BuildAgentsTree(root)
+	got, ok := services.BuildAgentsTree(root)
 
+	if !ok {
+		t.Fatal("BuildAgentsTree() ok = false, want true for an LLM root")
+	}
 	want := map[string]models.AgentInfo{
 		"root": {Name: "root", Tools: []genai.Tool{}, SubAgents: []string{}},
 	}
@@ -65,9 +68,12 @@ func TestBuildAgentsTreeNonLLMRoot(t *testing.T) {
 		t.Fatalf("agent.New() failed: %v", err)
 	}
 
-	got := services.BuildAgentsTree(root)
+	got, ok := services.BuildAgentsTree(root)
 
-	if diff := cmp.Diff(map[string]models.AgentInfo{}, got); diff != "" {
-		t.Errorf("BuildAgentsTree() mismatch (-want +got):\n%s", diff)
+	if ok {
+		t.Error("BuildAgentsTree() ok = true, want false for a non-LLM root")
+	}
+	if got != nil {
+		t.Errorf("BuildAgentsTree() = %v, want nil for a non-LLM root", got)
 	}
 }

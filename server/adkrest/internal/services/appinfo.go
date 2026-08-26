@@ -39,15 +39,20 @@ func llmState(a agent.Agent) (*llmagentinternal.State, bool) {
 	return llmagentinternal.Reveal(llmAgent), true
 }
 
-// BuildAgentsTree returns the agent tree rooted at root, keyed by agent name.
+// BuildAgentsTree returns the agent tree rooted at root, keyed by agent name,
+// and reports whether root is an LLM agent. It returns false and no tree when
+// root is not one, which is the caller's "root agent is not an LlmAgent" test.
+//
 // Only LLM agents appear in the tree, and a name already in the tree is not
-// walked again. The tree is empty when root is not an LLM agent.
-func BuildAgentsTree(root agent.Agent) map[string]models.AgentInfo {
-	agents := map[string]models.AgentInfo{}
-	if state, ok := llmState(root); ok {
-		visitAgent(root, state, agents)
+// walked again.
+func BuildAgentsTree(root agent.Agent) (map[string]models.AgentInfo, bool) {
+	state, ok := llmState(root)
+	if !ok {
+		return nil, false
 	}
-	return agents
+	agents := map[string]models.AgentInfo{}
+	visitAgent(root, state, agents)
+	return agents, true
 }
 
 func visitAgent(a agent.Agent, state *llmagentinternal.State, agents map[string]models.AgentInfo) {

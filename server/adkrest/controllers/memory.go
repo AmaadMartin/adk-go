@@ -55,7 +55,7 @@ func (c *MemoryAPIController) PatchMemoryHandler(rw http.ResponseWriter, req *ht
 		http.Error(rw, "Update memory request is invalid.", http.StatusBadRequest)
 		return
 	}
-	if updateRequest.SessionIDValue() == "" {
+	if updateRequest.SessionID == "" {
 		http.Error(rw, "Update memory request is invalid.", http.StatusBadRequest)
 		return
 	}
@@ -64,7 +64,7 @@ func (c *MemoryAPIController) PatchMemoryHandler(rw http.ResponseWriter, req *ht
 	storedSession, err := c.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
-		SessionID: updateRequest.SessionIDValue(),
+		SessionID: updateRequest.SessionID,
 	})
 	if err != nil {
 		http.Error(rw, fmt.Errorf("session not found: %w", err).Error(), http.StatusNotFound)
