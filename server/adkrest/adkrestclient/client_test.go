@@ -244,6 +244,14 @@ func TestHTTPErrorStatuses(t *testing.T) {
 		"DeleteSession": func(c *Client) error {
 			return c.DeleteSession(context.Background(), "a", "u", "s")
 		},
+		"RunAgent": func(c *Client) error {
+			for _, err := range c.RunAgent(context.Background(), RunRequest{AppName: "a", UserID: "u", SessionID: "s"}) {
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		},
 	}
 	for name, call := range calls {
 		for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusInternalServerError} {
