@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -67,33 +69,6 @@ func requireLiveStreamingTool(t *testing.T, cfg functiontool.Config, handler fun
 	return liveTool
 }
 
-// streamEntryPoints builds the same tool behind each streaming entry point, so
-// one table covers both. Only the live tool takes an input channel.
-var streamEntryPoints = []struct {
-	name string
-	run  func(t *testing.T, cfg functiontool.Config, handler functiontool.StreamingFunc[streamingArgs]) func(agent.Context, any) iter.Seq2[string, error]
-}{
-	{
-		name: "RunStream",
-		run: func(t *testing.T, cfg functiontool.Config, handler functiontool.StreamingFunc[streamingArgs]) func(agent.Context, any) iter.Seq2[string, error] {
-			t.Helper()
-			return requireStreamingTool(t, cfg, handler).RunStream
-		},
-	},
-	{
-		name: "RunStreamLive",
-		run: func(t *testing.T, cfg functiontool.Config, handler functiontool.StreamingFunc[streamingArgs]) func(agent.Context, any) iter.Seq2[string, error] {
-			t.Helper()
-			liveTool := requireLiveStreamingTool(t, cfg, func(ctx agent.Context, args streamingArgs, _ <-chan agent.LiveRequest) iter.Seq2[string, error] {
-				return handler(ctx, args)
-			})
-			return func(ctx agent.Context, args any) iter.Seq2[string, error] {
-				return liveTool.RunStreamLive(ctx, args, toolinternal.ClosedLiveRequests())
-			}
-		},
-	},
-}
-
 func TestStreamingFunctionToolConfirmation(t *testing.T) {
 	tests := []struct {
 		name                 string
@@ -119,55 +94,53 @@ func TestStreamingFunctionToolConfirmation(t *testing.T) {
 		},
 	}
 
-	for _, entryPoint := range streamEntryPoints {
-		for _, test := range tests {
-			t.Run(entryPoint.name+"/"+test.name, func(t *testing.T) {
-				actions := &session.EventActions{}
-				handlerCalled := false
-				run := entryPoint.run(t, functiontool.Config{
-					Name:                "streaming_tool",
-					RequireConfirmation: true,
-				}, func(_ agent.Context, args streamingArgs) iter.Seq2[string, error] {
-					handlerCalled = true
-					return func(yield func(string, error) bool) {
-						yield("handled "+args.Value, nil)
-					}
-				})
-
-				var values []string
-				var gotErr error
-				ctx := newStreamingToolContext(t, actions, test.confirmation)
-				for value, err := range run(ctx, map[string]any{"value": "request"}) {
-					values = append(values, value)
-					gotErr = err
-				}
-
-				if !errors.Is(gotErr, test.wantErr) {
-					t.Errorf("%s() error = %v, want %v", entryPoint.name, gotErr, test.wantErr)
-				}
-				if handlerCalled != test.wantHandlerCall {
-					t.Errorf("handler called = %t, want %t", handlerCalled, test.wantHandlerCall)
-				}
-				if test.wantHandlerCall {
-					if len(values) != 1 || values[0] != "handled request" {
-						t.Errorf("%s() values = %v, want [handled request]", entryPoint.name, values)
-					}
-				}
-
-				confirmation, requested := actions.RequestedToolConfirmations["call-id"]
-				if requested != test.wantConfirmationCall {
-					t.Fatalf("confirmation requested = %t, want %t", requested, test.wantConfirmationCall)
-				}
-				if test.wantConfirmationCall {
-					if !actions.SkipSummarization {
-						t.Error("SkipSummarization = false, want true")
-					}
-					if !strings.Contains(confirmation.Hint, "streaming_tool()") {
-						t.Errorf("confirmation hint = %q, want tool name", confirmation.Hint)
-					}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actions := &session.EventActions{}
+			handlerCalled := false
+			streamingTool := requireStreamingTool(t, functiontool.Config{
+				Name:                "streaming_tool",
+				RequireConfirmation: true,
+			}, func(_ agent.Context, args streamingArgs) iter.Seq2[string, error] {
+				handlerCalled = true
+				return func(yield func(string, error) bool) {
+					yield("handled "+args.Value, nil)
 				}
 			})
-		}
+
+			var values []string
+			var gotErr error
+			ctx := newStreamingToolContext(t, actions, test.confirmation)
+			for value, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+				values = append(values, value)
+				gotErr = err
+			}
+
+			if !errors.Is(gotErr, test.wantErr) {
+				t.Errorf("RunStream() error = %v, want %v", gotErr, test.wantErr)
+			}
+			if handlerCalled != test.wantHandlerCall {
+				t.Errorf("handler called = %t, want %t", handlerCalled, test.wantHandlerCall)
+			}
+			if test.wantHandlerCall {
+				if len(values) != 1 || values[0] != "handled request" {
+					t.Errorf("RunStream() values = %v, want [handled request]", values)
+				}
+			}
+
+			confirmation, requested := actions.RequestedToolConfirmations["call-id"]
+			if requested != test.wantConfirmationCall {
+				t.Fatalf("confirmation requested = %t, want %t", requested, test.wantConfirmationCall)
+			}
+			if test.wantConfirmationCall {
+				if !actions.SkipSummarization {
+					t.Error("SkipSummarization = false, want true")
+				}
+				if !strings.Contains(confirmation.Hint, "streaming_tool()") {
+					t.Errorf("confirmation hint = %q, want tool name", confirmation.Hint)
+				}
+			}
+		})
 	}
 }
 
@@ -204,6 +177,74 @@ func TestNewStreamingRequireConfirmationProviderValidation(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatal("NewStreaming() returned nil tool")
+			}
+		})
+	}
+}
+
+// TestRunStreamLiveReachesHandler checks the live entry point on both sides of
+// the confirmation gate: it delivers the input channel to the handler when the
+// call is confirmed, and refuses to run it when the user rejected the call.
+func TestRunStreamLiveReachesHandler(t *testing.T) {
+	tests := []struct {
+		name            string
+		confirmation    *toolconfirmation.ToolConfirmation
+		wantErr         error
+		wantHandlerCall bool
+	}{
+		{
+			name:            "confirmed",
+			confirmation:    &toolconfirmation.ToolConfirmation{Confirmed: true},
+			wantHandlerCall: true,
+		},
+		{
+			name:         "rejected",
+			confirmation: &toolconfirmation.ToolConfirmation{Confirmed: false},
+			wantErr:      tool.ErrConfirmationRejected,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var gotRequests int
+			liveTool := requireLiveStreamingTool(t, functiontool.Config{
+				Name:                "streaming_tool",
+				RequireConfirmation: true,
+			}, func(_ agent.Context, args streamingArgs, input <-chan agent.LiveRequest) iter.Seq2[string, error] {
+				return func(yield func(string, error) bool) {
+					for range input {
+						gotRequests++
+					}
+					yield("handled "+args.Value, nil)
+				}
+			})
+
+			input := make(chan agent.LiveRequest, 1)
+			input <- agent.LiveRequest{Content: genai.NewContentFromText("frame", genai.RoleUser)}
+			close(input)
+
+			var values []string
+			var gotErr error
+			ctx := newStreamingToolContext(t, &session.EventActions{}, test.confirmation)
+			for value, err := range liveTool.RunStreamLive(ctx, map[string]any{"value": "request"}, input) {
+				values = append(values, value)
+				gotErr = err
+			}
+
+			if !errors.Is(gotErr, test.wantErr) {
+				t.Errorf("RunStreamLive() error = %v, want %v", gotErr, test.wantErr)
+			}
+			if !test.wantHandlerCall {
+				if gotRequests != 0 {
+					t.Errorf("handler read %d requests, want 0: it must not run", gotRequests)
+				}
+				return
+			}
+			if gotRequests != 1 {
+				t.Errorf("handler read %d requests from its input channel, want 1", gotRequests)
+			}
+			if len(values) != 1 || values[0] != "handled request" {
+				t.Errorf("RunStreamLive() values = %v, want [handled request]", values)
 			}
 		})
 	}

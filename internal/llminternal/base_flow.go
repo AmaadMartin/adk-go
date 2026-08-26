@@ -1239,23 +1239,26 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						// Implementing the interface is how a tool opts in to
 						// live client input.
 						liveTool, wantsInput := curTool.(toolinternal.LiveInputStreamingTool)
+						// Another session implementation registers nothing, so
+						// the tool reads an already-closed channel and its
+						// drain loop ends at once.
 						input := toolinternal.ClosedLiveRequests()
-						// A tool's own output must not come back as its own
-						// live input, so its chunks bypass the fan-out that
-						// Send does. adk-python echoes them instead, which
-						// breaks the drain-the-backlog pattern these tools are
-						// written around.
 						sendChunk := liveSess.Send
-						impl, isLiveSessionImpl := liveSess.(*liveSessionImpl)
-						if isLiveSessionImpl {
+						impl, _ := liveSess.(*liveSessionImpl)
+						if impl != nil {
+							// A tool's own output must not come back as its
+							// own live input, so its chunks bypass the fan-out
+							// that Send does. adk-python echoes them instead,
+							// which breaks the drain-the-backlog pattern these
+							// tools are written around.
 							sendChunk = impl.sendToModel
-							if ch := impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel, wantsInput); ch != nil {
-								input = ch
-							}
+							// nil unless the tool opted in, and only an
+							// opted-in tool reads it.
+							input = impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel, wantsInput)
 						}
 						go func() {
 							defer func() {
-								if isLiveSessionImpl {
+								if impl != nil {
 									impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
 								}
 								cancel()
