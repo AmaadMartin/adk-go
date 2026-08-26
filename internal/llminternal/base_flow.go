@@ -180,9 +180,29 @@ func isThoughtOnlyTurn(ev *session.Event) bool {
 	return true
 }
 
+// liveToolInputBuffer bounds each input-streaming tool's channel. Delivery is
+// deliberately lossy: a tool that stops draining must never stall the loop that
+// feeds the model.
+const liveToolInputBuffer = 64
+
 type activeTask struct {
 	callID string
 	cancel context.CancelFunc
+	// input is the tool's dedicated live-input channel, nil unless the tool
+	// opted in. closed guards against a double close. Both fields are
+	// protected by liveSessionImpl.mu.
+	input  chan agent.LiveRequest
+	closed bool
+}
+
+// closeInput closes the task's live-input channel, so a handler ranging over it
+// returns. The caller must hold liveSessionImpl.mu.
+func (t *activeTask) closeInput() {
+	if t.input == nil || t.closed {
+		return
+	}
+	close(t.input)
+	t.closed = true
 }
 
 type liveSessionImpl struct {
@@ -192,19 +212,30 @@ type liveSessionImpl struct {
 	closeOnce   sync.Once
 	audioMgr    *AudioCacheManager
 	mu          sync.Mutex
-	activeTools map[string][]activeTask
+	activeTools map[string][]*activeTask
 }
 
-func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc) {
+// RegisterStreamingTool records a running streaming tool. When wantsInput is
+// set the tool also gets a dedicated channel of live client requests, which the
+// caller reads until the session closes it; otherwise the return value is nil.
+func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc, wantsInput bool) <-chan agent.LiveRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activeTools == nil {
-		s.activeTools = make(map[string][]activeTask)
+		s.activeTools = make(map[string][]*activeTask)
 	}
-	s.activeTools[toolName] = append(s.activeTools[toolName], activeTask{
-		callID: callID,
-		cancel: cancel,
-	})
+	task := &activeTask{callID: callID, cancel: cancel}
+	if wantsInput {
+		task.input = make(chan agent.LiveRequest, liveToolInputBuffer)
+		// Close already ran, so nothing will close this channel later.
+		select {
+		case <-s.done:
+			task.closeInput()
+		default:
+		}
+	}
+	s.activeTools[toolName] = append(s.activeTools[toolName], task)
+	return task.input
 }
 
 func (s *liveSessionImpl) UnregisterStreamingTool(toolName, callID string) {
@@ -216,6 +247,7 @@ func (s *liveSessionImpl) UnregisterStreamingTool(toolName, callID string) {
 	}
 	for i, task := range tasks {
 		if task.callID == callID {
+			task.closeInput()
 			s.activeTools[toolName] = append(tasks[:i], tasks[i+1:]...)
 			break
 		}
@@ -233,10 +265,31 @@ func (s *liveSessionImpl) CancelAllStreamingTools(toolName string) bool {
 		return false
 	}
 	for _, task := range tasks {
+		task.closeInput()
 		task.cancel()
 	}
 	delete(s.activeTools, toolName)
 	return true
+}
+
+// fanInToTools copies req into every input-streaming tool's channel. The sends
+// are non-blocking, so a tool that stopped draining loses requests instead of
+// stalling the caller. Holding s.mu across both the send and the close makes a
+// send on a closed channel impossible.
+func (s *liveSessionImpl) fanInToTools(req agent.LiveRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, tasks := range s.activeTools {
+		for _, task := range tasks {
+			if task.input == nil || task.closed {
+				continue
+			}
+			select {
+			case task.input <- req:
+			default:
+			}
+		}
+	}
 }
 
 type eventOrError struct {
@@ -253,7 +306,20 @@ func newLiveSessionImpl() *liveSessionImpl {
 	}
 }
 
+// Send forwards a client request to the model and copies it to every
+// input-streaming tool that is running.
 func (s *liveSessionImpl) Send(req agent.LiveRequest) error {
+	if err := s.sendToModel(req); err != nil {
+		return err
+	}
+	// Fan out only what the session accepted, so a request rejected by a
+	// closed session never reaches a tool.
+	s.fanInToTools(req)
+	return nil
+}
+
+// sendToModel queues req for the model without the fan-out that [Send] does.
+func (s *liveSessionImpl) sendToModel(req agent.LiveRequest) error {
 	select {
 	case s.inputCh <- req:
 		return nil
@@ -280,6 +346,15 @@ func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 func (s *liveSessionImpl) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.done)
+		// Release the input-streaming tools: a handler parked on its input
+		// channel has no other way to learn the session ended.
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, tasks := range s.activeTools {
+			for _, task := range tasks {
+				task.closeInput()
+			}
+		}
 	})
 	return nil
 }
@@ -1161,17 +1236,40 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 							Context:   toolCtx,
 							cancelCtx: cancelCtx,
 						}
-						if impl, ok := liveSess.(*liveSessionImpl); ok {
-							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
+						// Implementing the interface is how a tool opts in to
+						// live client input.
+						liveTool, wantsInput := curTool.(toolinternal.LiveInputStreamingTool)
+						// Another session implementation registers nothing, so
+						// the tool reads an already-closed channel and its
+						// drain loop ends at once.
+						input := toolinternal.ClosedLiveRequests()
+						sendChunk := liveSess.Send
+						impl, _ := liveSess.(*liveSessionImpl)
+						if impl != nil {
+							// A tool's own output must not come back as its
+							// own live input, so its chunks bypass the fan-out
+							// that Send does. adk-python echoes them instead,
+							// which breaks the drain-the-backlog pattern these
+							// tools are written around.
+							sendChunk = impl.sendToModel
+							// nil unless the tool opted in, and only an
+							// opted-in tool reads it.
+							input = impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel, wantsInput)
 						}
 						go func() {
 							defer func() {
-								if impl, ok := liveSess.(*liveSessionImpl); ok {
+								if impl != nil {
 									impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
 								}
 								cancel()
 							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+							var stream iter.Seq2[string, error]
+							if wantsInput {
+								stream = liveTool.RunStreamLive(cancelToolCtx, fnCall.Args, input)
+							} else {
+								stream = streamTool.RunStream(cancelToolCtx, fnCall.Args)
+							}
+							for chunk, err := range stream {
 								select {
 								case <-cancelCtx.Done():
 									return
@@ -1189,7 +1287,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 										},
 									},
 								}
-								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
+								if err := sendChunk(agent.LiveRequest{Content: updatedContent}); err != nil {
 									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
 									return
 								}

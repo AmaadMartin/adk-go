@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -33,8 +34,41 @@ import (
 // StreamingFunc represents a Go function that streams results.
 type StreamingFunc[TArgs any] func(agent.Context, TArgs) iter.Seq2[string, error]
 
+// LiveStreamingFunc is a streaming tool handler that also consumes live client
+// input.
+//
+// In a live (bidirectional streaming) session the flow gives the handler a
+// dedicated channel carrying every [agent.LiveRequest] the client sends while
+// the tool runs. The channel is closed when the tool is cancelled through
+// stop_streaming, and when the live session ends, so a "for req := range input"
+// loop terminates on its own. Outside a live session the channel is already
+// closed.
+//
+// Delivery is lossy under backpressure: a handler that stops draining the
+// channel loses requests rather than stalling the session.
+type LiveStreamingFunc[TArgs any] func(ctx agent.Context, args TArgs, input <-chan agent.LiveRequest) iter.Seq2[string, error]
+
 // NewStreaming creates a new streaming tool.
 func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Tool, error) {
+	return newStreamingTool(cfg, func(ctx agent.Context, args TArgs, _ <-chan agent.LiveRequest) iter.Seq2[string, error] {
+		return handler(ctx, args)
+	})
+}
+
+// NewLiveStreaming creates a streaming tool that receives live client input
+// while it runs. The tool behaves like a [NewStreaming] tool in every other
+// respect.
+func NewLiveStreaming[TArgs any](cfg Config, handler LiveStreamingFunc[TArgs]) (tool.Tool, error) {
+	base, err := newStreamingTool(cfg, handler)
+	if err != nil {
+		return nil, err
+	}
+	return &liveStreamingFunctionTool[TArgs]{streamingFunctionTool: base}, nil
+}
+
+// newStreamingTool validates cfg and builds the tool both streaming
+// constructors are built on.
+func newStreamingTool[TArgs any](cfg Config, handler LiveStreamingFunc[TArgs]) (*streamingFunctionTool[TArgs], error) {
 	var zeroArgs TArgs
 	argsType := reflect.TypeOf(zeroArgs)
 	for argsType != nil && argsType.Kind() == reflect.Pointer {
@@ -76,11 +110,22 @@ type streamingFunctionTool[TArgs any] struct {
 	inputSchema *jsonschema.Resolved
 
 	// handler is the Go function.
-	handler StreamingFunc[TArgs]
+	handler LiveStreamingFunc[TArgs]
 
 	requireConfirmation bool
 
 	requireConfirmationProvider func(TArgs) bool
+}
+
+// liveStreamingFunctionTool is the tool [NewLiveStreaming] returns. The extra
+// method is what makes it, and only it, a toolinternal.LiveInputStreamingTool.
+type liveStreamingFunctionTool[TArgs any] struct {
+	*streamingFunctionTool[TArgs]
+}
+
+// RunStreamLive implements toolinternal.LiveInputStreamingTool.
+func (f *liveStreamingFunctionTool[TArgs]) RunStreamLive(ctx agent.Context, args any, input <-chan agent.LiveRequest) iter.Seq2[string, error] {
+	return f.run(ctx, args, input)
 }
 
 // Description implements tool.Tool.
@@ -127,6 +172,12 @@ func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration 
 
 // RunStream executes the tool with the provided context and yields events.
 func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
+	return f.run(ctx, args, toolinternal.ClosedLiveRequests())
+}
+
+// run executes the tool and yields its chunks. input carries the live client
+// requests; it is already closed for a tool that did not ask for them.
+func (f *streamingFunctionTool[TArgs]) run(ctx agent.Context, args any, input <-chan agent.LiveRequest) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -139,7 +190,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			yield("", fmt.Errorf("unexpected args type, got: %T", args))
 			return
 		}
-		input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
+		toolArgs, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
 		if err != nil {
 			yield("", err)
 			return
@@ -154,7 +205,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			requireConfirmation := f.requireConfirmation
 
 			if f.requireConfirmationProvider != nil {
-				requireConfirmation = f.requireConfirmationProvider(input)
+				requireConfirmation = f.requireConfirmationProvider(toolArgs)
 			}
 
 			if requireConfirmation {
@@ -171,7 +222,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			}
 		}
 
-		for res, err := range f.handler(ctx, input) {
+		for res, err := range f.handler(ctx, toolArgs, input) {
 			if !yield(res, err) {
 				return
 			}

@@ -20,6 +20,9 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -51,6 +54,19 @@ func requireStreamingTool(t *testing.T, cfg functiontool.Config, handler functio
 		t.Fatalf("NewStreaming() returned %T, want toolinternal.StreamingFunctionTool", got)
 	}
 	return streamingTool
+}
+
+func requireLiveStreamingTool(t *testing.T, cfg functiontool.Config, handler functiontool.LiveStreamingFunc[streamingArgs]) toolinternal.LiveInputStreamingTool {
+	t.Helper()
+	got, err := functiontool.NewLiveStreaming(cfg, handler)
+	if err != nil {
+		t.Fatalf("NewLiveStreaming() failed: %v", err)
+	}
+	liveTool, ok := got.(toolinternal.LiveInputStreamingTool)
+	if !ok {
+		t.Fatalf("NewLiveStreaming() returned %T, want toolinternal.LiveInputStreamingTool", got)
+	}
+	return liveTool
 }
 
 func TestStreamingFunctionToolConfirmation(t *testing.T) {
@@ -164,6 +180,138 @@ func TestNewStreamingRequireConfirmationProviderValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunStreamLiveReachesHandler checks the live entry point on both sides of
+// the confirmation gate: it delivers the input channel to the handler when the
+// call is confirmed, and refuses to run it when the user rejected the call.
+func TestRunStreamLiveReachesHandler(t *testing.T) {
+	tests := []struct {
+		name            string
+		confirmation    *toolconfirmation.ToolConfirmation
+		wantErr         error
+		wantHandlerCall bool
+	}{
+		{
+			name:            "confirmed",
+			confirmation:    &toolconfirmation.ToolConfirmation{Confirmed: true},
+			wantHandlerCall: true,
+		},
+		{
+			name:         "rejected",
+			confirmation: &toolconfirmation.ToolConfirmation{Confirmed: false},
+			wantErr:      tool.ErrConfirmationRejected,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var gotRequests int
+			liveTool := requireLiveStreamingTool(t, functiontool.Config{
+				Name:                "streaming_tool",
+				RequireConfirmation: true,
+			}, func(_ agent.Context, args streamingArgs, input <-chan agent.LiveRequest) iter.Seq2[string, error] {
+				return func(yield func(string, error) bool) {
+					for range input {
+						gotRequests++
+					}
+					yield("handled "+args.Value, nil)
+				}
+			})
+
+			input := make(chan agent.LiveRequest, 1)
+			input <- agent.LiveRequest{Content: genai.NewContentFromText("frame", genai.RoleUser)}
+			close(input)
+
+			var values []string
+			var gotErr error
+			ctx := newStreamingToolContext(t, &session.EventActions{}, test.confirmation)
+			for value, err := range liveTool.RunStreamLive(ctx, map[string]any{"value": "request"}, input) {
+				values = append(values, value)
+				gotErr = err
+			}
+
+			if !errors.Is(gotErr, test.wantErr) {
+				t.Errorf("RunStreamLive() error = %v, want %v", gotErr, test.wantErr)
+			}
+			if !test.wantHandlerCall {
+				if gotRequests != 0 {
+					t.Errorf("handler read %d requests, want 0: it must not run", gotRequests)
+				}
+				return
+			}
+			if gotRequests != 1 {
+				t.Errorf("handler read %d requests from its input channel, want 1", gotRequests)
+			}
+			if len(values) != 1 || values[0] != "handled request" {
+				t.Errorf("RunStreamLive() values = %v, want [handled request]", values)
+			}
+		})
+	}
+}
+
+func TestNewLiveStreamingClosedInputOutsideLiveSession(t *testing.T) {
+	liveTool := requireLiveStreamingTool(t, functiontool.Config{Name: "streaming_tool"},
+		func(_ agent.Context, args streamingArgs, input <-chan agent.LiveRequest) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				count := 0
+				for range input {
+					count++
+				}
+				yield(fmt.Sprintf("%s after %d requests", args.Value, count), nil)
+			}
+		})
+
+	// RunStream is the path a live-input tool takes outside a live session.
+	// Its input channel must already be closed, or the drain loop hangs.
+	done := make(chan []string, 1)
+	go func() {
+		var values []string
+		ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
+		for value, err := range liveTool.RunStream(ctx, map[string]any{"value": "request"}) {
+			if err != nil {
+				t.Errorf("RunStream() error = %v, want nil", err)
+			}
+			values = append(values, value)
+		}
+		done <- values
+	}()
+
+	select {
+	case values := <-done:
+		if len(values) != 1 || values[0] != "request after 0 requests" {
+			t.Errorf("RunStream() values = %v, want [request after 0 requests]", values)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunStream() never finished: the input channel was left open outside a live session")
+	}
+}
+
+func TestNewLiveStreamingValidation(t *testing.T) {
+	handler := func(agent.Context, streamingArgs, <-chan agent.LiveRequest) iter.Seq2[string, error] {
+		return func(func(string, error) bool) {}
+	}
+
+	t.Run("args must be a struct or a map", func(t *testing.T) {
+		_, err := functiontool.NewLiveStreaming(functiontool.Config{Name: "streaming_tool"},
+			func(agent.Context, string, <-chan agent.LiveRequest) iter.Seq2[string, error] {
+				return func(func(string, error) bool) {}
+			})
+		if !errors.Is(err, functiontool.ErrInvalidArgument) {
+			t.Errorf("NewLiveStreaming() error = %v, want %v", err, functiontool.ErrInvalidArgument)
+		}
+	})
+
+	t.Run("confirmation provider signature", func(t *testing.T) {
+		wantError := fmt.Sprintf("error RequireConfirmationProvider must be a function with signature func(%T) bool", streamingArgs{})
+		_, err := functiontool.NewLiveStreaming(functiontool.Config{
+			Name:                        "streaming_tool",
+			RequireConfirmationProvider: func(string) bool { return true },
+		}, handler)
+		if err == nil || !strings.Contains(err.Error(), wantError) {
+			t.Fatalf("NewLiveStreaming() error = %v, want error containing %q", err, wantError)
+		}
+	})
 }
 
 func TestStreamingFunctionToolStopsHandlerWhenConsumerStops(t *testing.T) {

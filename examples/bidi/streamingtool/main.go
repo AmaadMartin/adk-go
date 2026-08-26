@@ -70,6 +70,30 @@ func main() {
 		log.Fatalf("Failed to create streaming tool: %v", err)
 	}
 
+	// Define an input-streaming tool. It reads the live client input while it
+	// runs, instead of only pushing chunks to the model.
+	monitorTool, err := functiontool.NewLiveStreaming(functiontool.Config{
+		Name:        "monitor_video_stream",
+		Description: "Watches the live video stream and reports the frames it receives.",
+	}, func(ctx agent.Context, args struct{}, input <-chan agent.LiveRequest) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) {
+			// ADK closes the channel on stop_streaming and when the session
+			// ends, so this loop terminates on its own.
+			for req := range input {
+				blob, ok := req.RealtimeInput.(*genai.Blob)
+				if !ok || blob.MIMEType != "image/jpeg" {
+					continue
+				}
+				if !yield(fmt.Sprintf("Saw a video frame of %d bytes.", len(blob.Data)), nil) {
+					return
+				}
+			}
+		}
+	})
+	if err != nil {
+		log.Fatalf("Failed to create input-streaming tool: %v", err)
+	}
+
 	// Define a standard tool to stop streaming.
 	// Note: While defined here so that the model is aware of the tool declaration,
 	// during live bidirectional streaming the ADK Live Control Plane intercepts
@@ -110,8 +134,8 @@ func main() {
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "bidi-demo",
 		Model:       model,
-		Instruction: "You are a helpful assistant with a streaming tool 'count_to'. Always use it when asked to count. Wait for the tool results, and when you recieve them you should say the number, if it is divisible by 3 you should not say the number and instead say Fizz and if it is divisible by 5 you should say Buzz, if it is divisible by both 3 and 5 you should say FizzBuzz. Always use the check_divisible tool",
-		Tools:       []tool.Tool{counterTool, stopTool, checkDivisibleTool},
+		Instruction: "You are a helpful assistant with a streaming tool 'count_to'. Always use it when asked to count. Wait for the tool results, and when you recieve them you should say the number, if it is divisible by 3 you should not say the number and instead say Fizz and if it is divisible by 5 you should say Buzz, if it is divisible by both 3 and 5 you should say FizzBuzz. Always use the check_divisible tool. Call 'monitor_video_stream' when the user asks you to watch their video, and report what it tells you.",
+		Tools:       []tool.Tool{counterTool, monitorTool, stopTool, checkDivisibleTool},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)

@@ -37,6 +37,32 @@ type StreamingFunctionTool interface {
 	RunStream(ctx agent.Context, args any) iter.Seq2[string, error]
 }
 
+// LiveInputStreamingTool is a streaming tool that consumes live client input
+// while it runs. The live flow gives such a tool a dedicated channel of
+// incoming requests; a tool that does not implement this interface keeps the
+// plain [StreamingFunctionTool] path and is unaffected.
+//
+// Implementing the interface is the opt-in: there is no extra flag to check.
+type LiveInputStreamingTool interface {
+	StreamingFunctionTool
+	RunStreamLive(ctx agent.Context, args any, input <-chan agent.LiveRequest) iter.Seq2[string, error]
+}
+
+// closedLiveRequests is shared by every caller: an already-closed channel
+// carries no state, so a single instance is enough.
+var closedLiveRequests = func() chan agent.LiveRequest {
+	ch := make(chan agent.LiveRequest)
+	close(ch)
+	return ch
+}()
+
+// ClosedLiveRequests returns an already-closed live-request channel, for an
+// input-streaming tool that runs with no live input source. A handler ranging
+// over it finishes at once instead of blocking forever.
+func ClosedLiveRequests() <-chan agent.LiveRequest {
+	return closedLiveRequests
+}
+
 type RequestProcessor interface {
 	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
 }
