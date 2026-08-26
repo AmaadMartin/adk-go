@@ -20,6 +20,7 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -53,6 +54,46 @@ func requireStreamingTool(t *testing.T, cfg functiontool.Config, handler functio
 	return streamingTool
 }
 
+func requireLiveStreamingTool(t *testing.T, cfg functiontool.Config, handler functiontool.LiveStreamingFunc[streamingArgs]) toolinternal.LiveInputStreamingTool {
+	t.Helper()
+	got, err := functiontool.NewLiveStreaming(cfg, handler)
+	if err != nil {
+		t.Fatalf("NewLiveStreaming() failed: %v", err)
+	}
+	liveTool, ok := got.(toolinternal.LiveInputStreamingTool)
+	if !ok {
+		t.Fatalf("NewLiveStreaming() returned %T, want toolinternal.LiveInputStreamingTool", got)
+	}
+	return liveTool
+}
+
+// streamEntryPoints builds the same tool behind each streaming entry point, so
+// one table covers both. Only the live tool takes an input channel.
+var streamEntryPoints = []struct {
+	name string
+	run  func(t *testing.T, cfg functiontool.Config, handler functiontool.StreamingFunc[streamingArgs]) func(agent.Context, any) iter.Seq2[string, error]
+}{
+	{
+		name: "RunStream",
+		run: func(t *testing.T, cfg functiontool.Config, handler functiontool.StreamingFunc[streamingArgs]) func(agent.Context, any) iter.Seq2[string, error] {
+			t.Helper()
+			return requireStreamingTool(t, cfg, handler).RunStream
+		},
+	},
+	{
+		name: "RunStreamLive",
+		run: func(t *testing.T, cfg functiontool.Config, handler functiontool.StreamingFunc[streamingArgs]) func(agent.Context, any) iter.Seq2[string, error] {
+			t.Helper()
+			liveTool := requireLiveStreamingTool(t, cfg, func(ctx agent.Context, args streamingArgs, _ <-chan agent.LiveRequest) iter.Seq2[string, error] {
+				return handler(ctx, args)
+			})
+			return func(ctx agent.Context, args any) iter.Seq2[string, error] {
+				return liveTool.RunStreamLive(ctx, args, toolinternal.ClosedLiveRequests())
+			}
+		},
+	},
+}
+
 func TestStreamingFunctionToolConfirmation(t *testing.T) {
 	tests := []struct {
 		name                 string
@@ -78,53 +119,55 @@ func TestStreamingFunctionToolConfirmation(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			actions := &session.EventActions{}
-			handlerCalled := false
-			streamingTool := requireStreamingTool(t, functiontool.Config{
-				Name:                "streaming_tool",
-				RequireConfirmation: true,
-			}, func(_ agent.Context, args streamingArgs) iter.Seq2[string, error] {
-				handlerCalled = true
-				return func(yield func(string, error) bool) {
-					yield("handled "+args.Value, nil)
+	for _, entryPoint := range streamEntryPoints {
+		for _, test := range tests {
+			t.Run(entryPoint.name+"/"+test.name, func(t *testing.T) {
+				actions := &session.EventActions{}
+				handlerCalled := false
+				run := entryPoint.run(t, functiontool.Config{
+					Name:                "streaming_tool",
+					RequireConfirmation: true,
+				}, func(_ agent.Context, args streamingArgs) iter.Seq2[string, error] {
+					handlerCalled = true
+					return func(yield func(string, error) bool) {
+						yield("handled "+args.Value, nil)
+					}
+				})
+
+				var values []string
+				var gotErr error
+				ctx := newStreamingToolContext(t, actions, test.confirmation)
+				for value, err := range run(ctx, map[string]any{"value": "request"}) {
+					values = append(values, value)
+					gotErr = err
+				}
+
+				if !errors.Is(gotErr, test.wantErr) {
+					t.Errorf("%s() error = %v, want %v", entryPoint.name, gotErr, test.wantErr)
+				}
+				if handlerCalled != test.wantHandlerCall {
+					t.Errorf("handler called = %t, want %t", handlerCalled, test.wantHandlerCall)
+				}
+				if test.wantHandlerCall {
+					if len(values) != 1 || values[0] != "handled request" {
+						t.Errorf("%s() values = %v, want [handled request]", entryPoint.name, values)
+					}
+				}
+
+				confirmation, requested := actions.RequestedToolConfirmations["call-id"]
+				if requested != test.wantConfirmationCall {
+					t.Fatalf("confirmation requested = %t, want %t", requested, test.wantConfirmationCall)
+				}
+				if test.wantConfirmationCall {
+					if !actions.SkipSummarization {
+						t.Error("SkipSummarization = false, want true")
+					}
+					if !strings.Contains(confirmation.Hint, "streaming_tool()") {
+						t.Errorf("confirmation hint = %q, want tool name", confirmation.Hint)
+					}
 				}
 			})
-
-			var values []string
-			var gotErr error
-			ctx := newStreamingToolContext(t, actions, test.confirmation)
-			for value, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
-				values = append(values, value)
-				gotErr = err
-			}
-
-			if !errors.Is(gotErr, test.wantErr) {
-				t.Errorf("RunStream() error = %v, want %v", gotErr, test.wantErr)
-			}
-			if handlerCalled != test.wantHandlerCall {
-				t.Errorf("handler called = %t, want %t", handlerCalled, test.wantHandlerCall)
-			}
-			if test.wantHandlerCall {
-				if len(values) != 1 || values[0] != "handled request" {
-					t.Errorf("RunStream() values = %v, want [handled request]", values)
-				}
-			}
-
-			confirmation, requested := actions.RequestedToolConfirmations["call-id"]
-			if requested != test.wantConfirmationCall {
-				t.Fatalf("confirmation requested = %t, want %t", requested, test.wantConfirmationCall)
-			}
-			if test.wantConfirmationCall {
-				if !actions.SkipSummarization {
-					t.Error("SkipSummarization = false, want true")
-				}
-				if !strings.Contains(confirmation.Hint, "streaming_tool()") {
-					t.Errorf("confirmation hint = %q, want tool name", confirmation.Hint)
-				}
-			}
-		})
+		}
 	}
 }
 
@@ -164,6 +207,70 @@ func TestNewStreamingRequireConfirmationProviderValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewLiveStreamingClosedInputOutsideLiveSession(t *testing.T) {
+	liveTool := requireLiveStreamingTool(t, functiontool.Config{Name: "streaming_tool"},
+		func(_ agent.Context, args streamingArgs, input <-chan agent.LiveRequest) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				count := 0
+				for range input {
+					count++
+				}
+				yield(fmt.Sprintf("%s after %d requests", args.Value, count), nil)
+			}
+		})
+
+	// RunStream is the path a live-input tool takes outside a live session.
+	// Its input channel must already be closed, or the drain loop hangs.
+	done := make(chan []string, 1)
+	go func() {
+		var values []string
+		ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
+		for value, err := range liveTool.RunStream(ctx, map[string]any{"value": "request"}) {
+			if err != nil {
+				t.Errorf("RunStream() error = %v, want nil", err)
+			}
+			values = append(values, value)
+		}
+		done <- values
+	}()
+
+	select {
+	case values := <-done:
+		if len(values) != 1 || values[0] != "request after 0 requests" {
+			t.Errorf("RunStream() values = %v, want [request after 0 requests]", values)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunStream() never finished: the input channel was left open outside a live session")
+	}
+}
+
+func TestNewLiveStreamingValidation(t *testing.T) {
+	handler := func(agent.Context, streamingArgs, <-chan agent.LiveRequest) iter.Seq2[string, error] {
+		return func(func(string, error) bool) {}
+	}
+
+	t.Run("args must be a struct or a map", func(t *testing.T) {
+		_, err := functiontool.NewLiveStreaming(functiontool.Config{Name: "streaming_tool"},
+			func(agent.Context, string, <-chan agent.LiveRequest) iter.Seq2[string, error] {
+				return func(func(string, error) bool) {}
+			})
+		if !errors.Is(err, functiontool.ErrInvalidArgument) {
+			t.Errorf("NewLiveStreaming() error = %v, want %v", err, functiontool.ErrInvalidArgument)
+		}
+	})
+
+	t.Run("confirmation provider signature", func(t *testing.T) {
+		wantError := fmt.Sprintf("error RequireConfirmationProvider must be a function with signature func(%T) bool", streamingArgs{})
+		_, err := functiontool.NewLiveStreaming(functiontool.Config{
+			Name:                        "streaming_tool",
+			RequireConfirmationProvider: func(string) bool { return true },
+		}, handler)
+		if err == nil || !strings.Contains(err.Error(), wantError) {
+			t.Fatalf("NewLiveStreaming() error = %v, want error containing %q", err, wantError)
+		}
+	})
 }
 
 func TestStreamingFunctionToolStopsHandlerWhenConsumerStops(t *testing.T) {
