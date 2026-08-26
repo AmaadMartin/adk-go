@@ -241,11 +241,14 @@ func TestGetAppInfoRepeatedAgentName(t *testing.T) {
 		SubAgents: []agent.Agent{
 			newLLMAgent(t, llmagent.Config{
 				Name: "branch",
-				// A second agent that reuses the root's name. Without the
-				// visited guard the walk would descend into it again.
+				// A second agent that reuses the root's name. The guard must
+				// stop here, so the impostor's own child never joins the tree.
 				SubAgents: []agent.Agent{newLLMAgent(t, llmagent.Config{
 					Name:        "root",
 					Instruction: "The impostor.",
+					SubAgents: []agent.Agent{newLLMAgent(t, llmagent.Config{
+						Name: "impostor_child",
+					})},
 				})},
 			}),
 		},
@@ -265,6 +268,9 @@ func TestGetAppInfoRepeatedAgentName(t *testing.T) {
 	}
 	if got, want := got.Agents["root"].Instruction, "The real root."; got != want {
 		t.Errorf("root instruction = %q, want %q", got, want)
+	}
+	if _, walked := got.Agents["impostor_child"]; walked {
+		t.Error("the walk descended into the repeated name; impostor_child is in the tree")
 	}
 }
 
