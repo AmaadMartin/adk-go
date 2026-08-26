@@ -38,6 +38,23 @@ type CreateSessionRequest struct {
 	Events []Event        `json:"events"`
 }
 
+// UpdateSessionRequest is the body of PATCH …/sessions/{session_id}.
+//
+// adk-python accepts both spellings of the field: its schema advertises
+// stateDelta, but its own shipped client posts state_delta.
+type UpdateSessionRequest struct {
+	StateDelta      map[string]any `json:"stateDelta"`
+	StateDeltaAlias map[string]any `json:"state_delta"`
+}
+
+// Delta returns the state delta under whichever spelling the caller used.
+func (r UpdateSessionRequest) Delta() map[string]any {
+	if r.StateDelta != nil {
+		return r.StateDelta
+	}
+	return r.StateDeltaAlias
+}
+
 type SessionID struct {
 	ID      string `mapstructure:"session_id,optional"`
 	AppName string `mapstructure:"app_name,required"`
