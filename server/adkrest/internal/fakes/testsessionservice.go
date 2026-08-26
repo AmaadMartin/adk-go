@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"time"
 
 	"google.golang.org/adk/v2/session"
@@ -98,6 +99,8 @@ func (s TestSession) LastUpdateTime() time.Time {
 
 type FakeSessionService struct {
 	Sessions map[SessionKey]TestSession
+	// AppendErr, when set, is returned by AppendEvent.
+	AppendErr error
 }
 
 type SessionKey struct {
@@ -174,11 +177,21 @@ func (s *FakeSessionService) Delete(ctx context.Context, req *session.DeleteRequ
 }
 
 func (s *FakeSessionService) AppendEvent(ctx context.Context, curSession session.Session, event *session.Event) error {
+	if s.AppendErr != nil {
+		return s.AppendErr
+	}
 	testSession, ok := curSession.(*TestSession)
 	if !ok {
 		return fmt.Errorf("invalid session type")
 	}
 	testSession.SessionEvents = append(testSession.SessionEvents, event)
+	// Apply the state delta like the real service does.
+	if len(event.Actions.StateDelta) > 0 {
+		if testSession.SessionState == nil {
+			testSession.SessionState = TestState{}
+		}
+		maps.Copy(testSession.SessionState, event.Actions.StateDelta)
+	}
 	testSession.UpdatedAt = event.Timestamp
 	s.Sessions[testSession.Id] = *testSession
 	return nil

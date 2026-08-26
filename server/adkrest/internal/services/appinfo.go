@@ -29,34 +29,46 @@ type declaredTool interface {
 	Declaration() *genai.FunctionDeclaration
 }
 
+// llmState returns the LLM state of a and reports whether a is an LLM agent.
+// llmAgent is unexported, so this assertion is the "is it an LLM agent?" test.
+func llmState(a agent.Agent) (*llmagentinternal.State, bool) {
+	llmAgent, ok := a.(llmagentinternal.Agent)
+	if !ok {
+		return nil, false
+	}
+	return llmagentinternal.Reveal(llmAgent), true
+}
+
 // BuildAgentsTree returns the agent tree rooted at root, keyed by agent name.
 // Only LLM agents appear in the tree, and a name already in the tree is not
-// walked again.
+// walked again. The tree is empty when root is not an LLM agent.
 func BuildAgentsTree(root agent.Agent) map[string]models.AgentInfo {
 	agents := map[string]models.AgentInfo{}
-	visitAgent(root, agents)
+	if state, ok := llmState(root); ok {
+		visitAgent(root, state, agents)
+	}
 	return agents
 }
 
-func visitAgent(a agent.Agent, agents map[string]models.AgentInfo) {
-	llmAgent, ok := a.(llmagentinternal.Agent)
-	if !ok {
-		return
-	}
+func visitAgent(a agent.Agent, state *llmagentinternal.State, agents map[string]models.AgentInfo) {
 	if _, seen := agents[a.Name()]; seen {
 		return
 	}
+	// Claim the name before walking the sub-agents, so a sub-agent that leads
+	// back to this name stops here instead of recursing forever. The final
+	// value replaces this placeholder below.
+	agents[a.Name()] = models.AgentInfo{}
 
 	subAgentNames := []string{}
 	for _, subAgent := range a.SubAgents() {
-		if _, ok := subAgent.(llmagentinternal.Agent); !ok {
+		subState, ok := llmState(subAgent)
+		if !ok {
 			continue
 		}
-		visitAgent(subAgent, agents)
+		visitAgent(subAgent, subState, agents)
 		subAgentNames = append(subAgentNames, subAgent.Name())
 	}
 
-	state := llmagentinternal.Reveal(llmAgent)
 	agents[a.Name()] = models.AgentInfo{
 		Name:        a.Name(),
 		Description: a.Description(),
@@ -79,13 +91,11 @@ func toolDeclarations(tools []tool.Tool) []genai.Tool {
 		if !ok {
 			continue
 		}
-		declaration := declared.Declaration()
-		if declaration == nil {
-			continue
+		if declaration := declared.Declaration(); declaration != nil {
+			declarations = append(declarations, genai.Tool{
+				FunctionDeclarations: []*genai.FunctionDeclaration{declaration},
+			})
 		}
-		declarations = append(declarations, genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{declaration},
-		})
 	}
 	return declarations
 }
