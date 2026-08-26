@@ -562,10 +562,12 @@ func TestRunLiveCloseStopsIdleSession(t *testing.T) {
 func TestRunLiveConcurrentToolResponseAndRealtimeInput(t *testing.T) {
 	baseline, _ := runLiveStacks()
 
-	// The fake server issues a tool call as soon as the session is up, so the
-	// consumer loop writes a tool response while the sender pumps audio.
+	// The fake server answers every frame with a tool call, so the consumer
+	// loop keeps writing tool responses for as long as the sender pumps audio.
+	// One tool call would leave a single write to overlap with, which the two
+	// goroutines usually miss.
+	const toolCall = `{"toolCall":{"functionCalls":[{"id":"call_1","name":"probe","args":{}}]}}`
 	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
-		toolCall := `{"toolCall":{"functionCalls":[{"id":"call_1","name":"probe","args":{}}]}}`
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(toolCall)); err != nil {
 			return
 		}
@@ -573,7 +575,7 @@ func TestRunLiveConcurrentToolResponseAndRealtimeInput(t *testing.T) {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
 			}
-			if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(toolCall)); err != nil {
 				return
 			}
 		}
@@ -622,25 +624,30 @@ func TestRunLiveConcurrentToolResponseAndRealtimeInput(t *testing.T) {
 			if err := sess.Send(req); err != nil {
 				return
 			}
-			time.Sleep(time.Millisecond)
 		}
 	}()
 
-	sawTurn := false
+	// Run for several tool calls rather than one, so the two writers overlap
+	// repeatedly. sess.Send parks on an unbuffered channel, so the pump paces
+	// itself against the consumer without a sleep.
+	const wantTurns = 20
+	turns := 0
 	for ev, err := range seq {
 		if err != nil {
 			continue // the post-cancel context.Canceled error is expected
 		}
-		if ev != nil && ev.LLMResponse.Content != nil && !sawTurn {
-			sawTurn = true
-			close(stop)
-			cancel()
+		if ev != nil && ev.LLMResponse.Content != nil {
+			turns++
+			if turns == wantTurns {
+				close(stop)
+				cancel()
+			}
 		}
 	}
 	senderDone.Wait()
 
-	if !sawTurn {
-		t.Error("never received a model turn while the tool response and realtime input overlapped")
+	if turns < wantTurns {
+		t.Errorf("observed %d model turns, want %d: the tool response and realtime input never overlapped", turns, wantTurns)
 	}
 	assertNoRunLiveLeak(t, baseline)
 }
