@@ -156,6 +156,8 @@ func TestWorkspaceResolveRejectsPathsOutsideTheRoot(t *testing.T) {
 		{name: "parent directory", path: ".."},
 		{name: "traversal through a child", path: "tools/../../secret.txt"},
 		{name: "traversal from the root", path: "../secret.txt"},
+		{name: "traversal to a path that does not exist", path: "../absent.txt"},
+		{name: "traversal through a directory that does not exist", path: "absent/../../secret.txt"},
 		{name: "absolute path outside the root", path: outside},
 		{name: "absolute sibling sharing the root prefix", path: filepath.Join(sibling, "secret.txt")},
 		{name: "symlink leaving the root", path: "escape_link/secret.txt"},

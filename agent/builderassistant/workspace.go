@@ -116,11 +116,9 @@ func (w *workspace) resolve(name string) (string, error) {
 			return "", fmt.Errorf("%w: %q", ErrOutsideRoot, name)
 		}
 	}
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: %q", ErrOutsideRoot, name)
-	}
-	// Stat walks the name through the root handle, so a symlink that leaves
-	// the sandbox is refused here rather than at the first read or write.
+	// Stat walks the name through the root handle, so a name that leaves the
+	// sandbox — through "..", or through a symlink — is refused here rather
+	// than at the first read or write.
 	if _, err := w.root.Stat(clean); isEscape(err) {
 		return "", fmt.Errorf("%w: %q: %w", ErrOutsideRoot, name, err)
 	}
