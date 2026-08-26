@@ -18,10 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"path"
 	"path/filepath"
 	"slices"
-	"sort"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
@@ -39,11 +39,11 @@ type readFilesArgs struct {
 	FilePaths []string `json:"file_paths" jsonschema:"paths of the files to read, relative to the project directory"`
 }
 
-// fileRead is the outcome of reading one file.
+// fileRead is the outcome of reading one file. An empty Error means the file
+// was read.
 type fileRead struct {
 	Content  string `json:"content"`
 	FileSize int64  `json:"file_size"`
-	Exists   bool   `json:"exists"`
 	Error    string `json:"error,omitempty"`
 }
 
@@ -69,7 +69,7 @@ func readFiles(ctx agent.Context, args readFilesArgs) (readFilesResult, error) {
 	if err != nil {
 		return readFilesResult{}, err
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	result := readFilesResult{
 		Success:    true,
@@ -90,7 +90,6 @@ func readFiles(ctx agent.Context, args readFilesArgs) (readFilesResult, error) {
 		result.Files[rel] = fileRead{
 			Content:  string(content),
 			FileSize: int64(len(content)),
-			Exists:   true,
 		}
 		result.SuccessfulReads++
 	}
@@ -131,14 +130,14 @@ func writeFiles(ctx agent.Context, args writeFilesArgs) (writeFilesResult, error
 	if err != nil {
 		return writeFilesResult{}, err
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	result := writeFilesResult{
 		Success:    true,
 		Files:      make(map[string]fileWrite, len(args.Files)),
 		TotalFiles: len(args.Files),
 	}
-	for _, requested := range sortedKeys(args.Files) {
+	for _, requested := range slices.Sorted(maps.Keys(args.Files)) {
 		rel, err := w.resolve(requested)
 		if err != nil {
 			return writeFilesResult{}, err
@@ -207,7 +206,7 @@ func deleteFiles(ctx agent.Context, args deleteFilesArgs) (deleteFilesResult, er
 	if err != nil {
 		return deleteFilesResult{}, err
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	result := deleteFilesResult{
 		Success:    true,
@@ -278,7 +277,7 @@ func cleanupUnusedFiles(ctx agent.Context, args cleanupUnusedFilesArgs) (cleanup
 	if err != nil {
 		return cleanupUnusedFilesResult{}, err
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	used, err := w.resolveAll(args.UsedFiles)
 	if err != nil {
@@ -310,7 +309,7 @@ func cleanupUnusedFiles(ctx agent.Context, args cleanupUnusedFilesArgs) (cleanup
 	if walkErr != nil {
 		return cleanupUnusedFilesResult{}, fmt.Errorf("scan the project directory %q: %w", w.path, walkErr)
 	}
-	sort.Strings(result.UnusedFiles)
+	slices.Sort(result.UnusedFiles)
 	return result, nil
 }
 
@@ -333,15 +332,4 @@ func describeFileError(action, absPath string, err error) string {
 		return fmt.Sprintf("file does not exist: %s", absPath)
 	}
 	return fmt.Sprintf("failed to %s %s: %v", action, absPath, err)
-}
-
-// sortedKeys returns the keys of m in a fixed order, so that a batch write
-// behaves the same way on every run.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }

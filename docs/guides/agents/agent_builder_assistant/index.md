@@ -122,18 +122,14 @@ own symlink-free prefix; the assistant is told to use relative paths.
 
 ```go
 type Config struct {
-	Model       model.LLM
-	SearchModel model.LLM
+	Model model.LLM
 }
 ```
 
-`Model` is required. Its `Name` is also the model id the assistant writes into
-the configs it generates, so use a model ADK's config loader accepts. `New`
-returns `ErrNoModel` when it is nil.
-
-`SearchModel` backs the two research sub-agents, which only search the web and
-read pages. It is optional, and they use `Model` when it is nil. A smaller model
-is usually enough for them.
+`Model` is required, and it backs the assistant and both research sub-agents.
+Its `Name` is also the model id the assistant writes into the configs it
+generates, so use a model ADK's config loader accepts. `New` returns
+`ErrNoModel` when it is nil.
 
 ## Tools
 

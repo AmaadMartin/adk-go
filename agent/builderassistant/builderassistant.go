@@ -42,14 +42,10 @@ var ErrNoModel = errors.New("builderassistant: Config.Model is required")
 
 // Config configures the Agent Builder Assistant.
 type Config struct {
-	// Model backs the assistant. Its Name is also the model id the assistant
-	// writes into the agent configs it generates, so it must be a model ADK's
-	// config loader accepts. Required.
+	// Model backs the assistant and its two research sub-agents. Its Name is
+	// also the model id the assistant writes into the agent configs it
+	// generates, so it must be a model ADK's config loader accepts. Required.
 	Model model.LLM
-
-	// SearchModel backs the two research sub-agents, which only search the web
-	// and read pages. Optional: they use Model when this is nil.
-	SearchModel model.LLM
 }
 
 // New returns the Agent Builder Assistant: an agent that designs an ADK
@@ -92,12 +88,11 @@ func newAgentConfig(cfg Config) (llmagent.Config, error) {
 // a capability the prompt relies on, so a missing one silently disables part of
 // the assistant.
 func newTools(cfg Config) ([]tool.Tool, error) {
-	research := researchModel(cfg)
-	searchAgent, err := newGoogleSearchAgent(research)
+	searchAgent, err := newGoogleSearchAgent(cfg.Model)
 	if err != nil {
 		return nil, fmt.Errorf("build the search agent: %w", err)
 	}
-	urlAgent, err := newURLContextAgent(research)
+	urlAgent, err := newURLContextAgent(cfg.Model)
 	if err != nil {
 		return nil, fmt.Errorf("build the url context agent: %w", err)
 	}
@@ -122,14 +117,4 @@ func newTools(cfg Config) ([]tool.Tool, error) {
 		tools = append(tools, built)
 	}
 	return tools, nil
-}
-
-// researchModel is the model the two research sub-agents run on. They only
-// search the web and read pages, so a smaller model than the assistant's is
-// usually enough.
-func researchModel(cfg Config) model.LLM {
-	if cfg.SearchModel != nil {
-		return cfg.SearchModel
-	}
-	return cfg.Model
 }

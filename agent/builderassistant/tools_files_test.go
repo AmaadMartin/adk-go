@@ -39,8 +39,8 @@ func TestReadFiles(t *testing.T) {
 	want := readFilesResult{
 		Success: true,
 		Files: map[string]fileRead{
-			"root_agent.yaml": {Content: "name: root\n", FileSize: 11, Exists: true},
-			"tools/search.go": {Content: "package tools\n", FileSize: 14, Exists: true},
+			"root_agent.yaml": {Content: "name: root\n", FileSize: 11},
+			"tools/search.go": {Content: "package tools\n", FileSize: 14},
 		},
 		SuccessfulReads: 2,
 		TotalFiles:      2,
@@ -66,8 +66,8 @@ func TestReadFilesReportsAMissingFileWithoutFailingTheCall(t *testing.T) {
 		t.Errorf("readFiles counted %d of %d reads, want 1 of 2", got.SuccessfulReads, got.TotalFiles)
 	}
 	absent := got.Files["absent.yaml"]
-	if absent.Exists {
-		t.Error("readFiles reported the missing file as existing")
+	if absent.Content != "" || absent.FileSize != 0 {
+		t.Errorf("readFiles returned content for the file it could not read: %+v", absent)
 	}
 	if want := "file does not exist: " + filepath.Join(root, "absent.yaml"); absent.Error != want {
 		t.Errorf("readFiles error = %q, want %q", absent.Error, want)

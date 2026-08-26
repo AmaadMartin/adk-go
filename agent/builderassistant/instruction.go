@@ -28,13 +28,14 @@ import (
 //go:embed instruction.md
 var instructionTemplate string
 
-// The template carries these three placeholders and nothing else. They are
+// The template carries these four placeholders and nothing else. They are
 // spelled with doubled braces so they cannot collide with the single-brace
 // session-state syntax of llmagent.Config.Instruction.
 const (
-	schemaPlaceholder = "{{schema_content}}"
-	modelPlaceholder  = "{{default_model}}"
-	folderPlaceholder = "{{project_folder_name}}"
+	modelPlaceholder        = "{{default_model}}"
+	folderPlaceholder       = "{{project_folder_name}}"
+	toolNamesPlaceholder    = "{{tool_names}}"
+	agentClassesPlaceholder = "{{agent_classes}}"
 )
 
 // fallbackProjectFolderName names the project when the root directory has no
@@ -43,13 +44,15 @@ const fallbackProjectFolderName = "project"
 
 // newInstructionProvider returns the assistant's instruction provider.
 //
-// The schema reference and the model id are the same on every invocation, so
-// they are substituted once here. Only the project folder name is resolved per
-// invocation, because the session decides it.
+// Only the project folder name changes between invocations, so everything else
+// is substituted once here. The tool and agent class lists come from the same
+// values write_config_files checks against, so the prompt cannot promise the
+// model something the check rejects.
 func newInstructionProvider(modelName string) llmagent.InstructionProvider {
 	prompt := strings.NewReplacer(
-		schemaPlaceholder, agentConfigReference(),
 		modelPlaceholder, modelName,
+		toolNamesPlaceholder, strings.Join(configToolNames, ", "),
+		agentClassesPlaceholder, strings.Join(agentClasses, ", "),
 	).Replace(instructionTemplate)
 
 	return func(ctx agent.ReadonlyContext) (string, error) {

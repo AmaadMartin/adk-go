@@ -23,6 +23,10 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// unsupportedMarker opens the paragraph that lists the adk-python fields
+// adk-go does not read.
+const unsupportedMarker = "Not supported by adk-go."
+
 func TestInstructionProviderFillsTheModelAndTheProjectFolder(t *testing.T) {
 	project := filepath.Join(newProject(t), "my_agent_project")
 	if err := os.Mkdir(project, 0o755); err != nil {
@@ -46,7 +50,7 @@ func TestInstructionProviderFillsTheModelAndTheProjectFolder(t *testing.T) {
 			t.Errorf("the instruction does not contain %q", want)
 		}
 	}
-	for _, placeholder := range []string{schemaPlaceholder, modelPlaceholder, folderPlaceholder} {
+	for _, placeholder := range []string{modelPlaceholder, folderPlaceholder, toolNamesPlaceholder, agentClassesPlaceholder} {
 		if strings.Contains(instruction, placeholder) {
 			t.Errorf("the instruction still contains the placeholder %q", placeholder)
 		}
@@ -125,9 +129,10 @@ func TestInstructionDescribesEveryTool(t *testing.T) {
 // later edit adds to the template but nothing substitutes.
 func TestInstructionKeepsOnlyTheKnownPlaceholders(t *testing.T) {
 	stripped := strings.NewReplacer(
-		schemaPlaceholder, "",
 		modelPlaceholder, "",
 		folderPlaceholder, "",
+		toolNamesPlaceholder, "",
+		agentClassesPlaceholder, "",
 	).Replace(instructionTemplate)
 
 	if strings.Contains(stripped, "{{") {
@@ -140,4 +145,106 @@ func placeholderContext(text string) string {
 	start := strings.Index(text, "{{")
 	end := min(start+60, len(text))
 	return text[start:end]
+}
+
+// renderInstruction resolves the prompt for a session rooted at dir.
+func renderInstruction(t *testing.T, dir string) string {
+	t.Helper()
+	instruction, err := newInstructionProvider("gemini-2.5-pro")(newContext(t, dir))
+	if err != nil {
+		t.Fatalf("the instruction provider returned error: %v", err)
+	}
+	return instruction
+}
+
+// referenceBlock returns the fenced AgentConfig reference inside instruction.
+func referenceBlock(t *testing.T, instruction string) string {
+	t.Helper()
+	const fence = "```text\n"
+	start := strings.Index(instruction, fence)
+	if start < 0 {
+		t.Fatal("the instruction has no fenced reference block")
+	}
+	block := instruction[start+len(fence):]
+	end := strings.Index(block, "\n```")
+	if end < 0 {
+		t.Fatal("the fenced reference block is never closed")
+	}
+	return block[:end]
+}
+
+func TestInstructionOpensTheReferenceWithItsHeading(t *testing.T) {
+	block := referenceBlock(t, renderInstruction(t, newProject(t)))
+
+	const want = "ADK AgentConfig quick reference\n----"
+	if !strings.HasPrefix(block, want) {
+		t.Errorf("the reference starts with %q, want it to start with %q", first(block, len(want)), want)
+	}
+}
+
+func TestInstructionNamesEverythingTheLoaderAccepts(t *testing.T) {
+	block := referenceBlock(t, renderInstruction(t, newProject(t)))
+
+	for _, class := range agentClasses {
+		if !strings.Contains(block, class) {
+			t.Errorf("the reference does not name the agent class %q", class)
+		}
+	}
+	for _, name := range configToolNames {
+		if !strings.Contains(block, name) {
+			t.Errorf("the reference does not name the tool %q", name)
+		}
+	}
+}
+
+// TestInstructionKeepsPythonOnlyFieldsOutOfTheGuidance is the guard against
+// someone pasting adk-python's reference text back in. adk-go's loader ignores
+// or rejects these fields, so the assistant must only meet them in the
+// paragraph that says they do not work.
+func TestInstructionKeepsPythonOnlyFieldsOutOfTheGuidance(t *testing.T) {
+	instruction := renderInstruction(t, newProject(t))
+	cut := strings.Index(instruction, unsupportedMarker)
+	if cut < 0 {
+		t.Fatalf("the instruction has no %q paragraph", unsupportedMarker)
+	}
+	guidance := instruction[:cut]
+
+	unsupported := []string{
+		"input_schema",
+		"output_schema",
+		"output_key",
+		"include_contents",
+		"before_model_callbacks",
+		"after_model_callbacks",
+		"before_tool_callbacks",
+		"after_tool_callbacks",
+	}
+	for _, field := range unsupported {
+		if strings.Contains(guidance, field) {
+			t.Errorf("the instruction offers %q, which adk-go's loader does not read", field)
+		}
+		if !strings.Contains(instruction[cut:], field) {
+			t.Errorf("the instruction does not warn that %q is unsupported", field)
+		}
+	}
+}
+
+func TestInstructionStatesTheLoaderLimits(t *testing.T) {
+	instruction := renderInstruction(t, newProject(t))
+
+	for _, want := range []string{
+		"inline code agent references are not yet supported",
+		"RegisterToolFactory",
+		"max_iterations",
+		"generate_content_config",
+	} {
+		if !strings.Contains(instruction, want) {
+			t.Errorf("the instruction does not mention %q", want)
+		}
+	}
+}
+
+// first returns at most n characters of text.
+func first(text string, n int) string {
+	return text[:min(n, len(text))]
 }

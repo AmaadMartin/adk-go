@@ -90,9 +90,10 @@ func createWorkspace(ctx agent.ReadonlyContext) (*workspace, error) {
 	return openWorkspace(ctx)
 }
 
-// Close releases the directory handle.
-func (w *workspace) Close() error {
-	return w.root.Close()
+// Close releases the directory handle. It reports nothing: every write is
+// already flushed when it returns, so a caller has no decision to make.
+func (w *workspace) Close() {
+	_ = w.root.Close()
 }
 
 // resolve turns a path supplied by the model into a name relative to the

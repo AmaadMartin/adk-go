@@ -148,20 +148,8 @@ func TestNewRejectsAConfigWithoutAModel(t *testing.T) {
 	if _, err := New(Config{}); !errors.Is(err, ErrNoModel) {
 		t.Errorf("New returned %v, want an error matching ErrNoModel", err)
 	}
-	if _, err := newAgentConfig(Config{SearchModel: stubModel{name: "gemini-2.5-flash"}}); !errors.Is(err, ErrNoModel) {
+	if _, err := newAgentConfig(Config{}); !errors.Is(err, ErrNoModel) {
 		t.Errorf("newAgentConfig returned %v, want an error matching ErrNoModel", err)
-	}
-}
-
-func TestResearchModelFallsBackToTheAssistantModel(t *testing.T) {
-	assistant := stubModel{name: "gemini-2.5-pro"}
-	search := stubModel{name: "gemini-2.5-flash"}
-
-	if got := researchModel(Config{Model: assistant}); got != model.LLM(assistant) {
-		t.Errorf("researchModel = %v, want the assistant model", got)
-	}
-	if got := researchModel(Config{Model: assistant, SearchModel: search}); got != model.LLM(search) {
-		t.Errorf("researchModel = %v, want the search model", got)
 	}
 }
 
