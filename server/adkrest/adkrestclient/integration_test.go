@@ -48,7 +48,6 @@ func TestClient_RoundTripAgainstRealServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer c.Close()
 
 	created, err := c.CreateSession(ctx, integrationApp, integrationUser, map[string]any{"greeting": "Hi"})
 	if err != nil {
@@ -117,7 +116,6 @@ func TestClient_RunAgentAgainstRealServerRejectsUnknownApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer c.Close()
 
 	created, err := c.CreateSession(ctx, integrationApp, integrationUser, nil)
 	if err != nil {

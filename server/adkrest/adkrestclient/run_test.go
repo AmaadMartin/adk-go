@@ -313,7 +313,12 @@ func TestRunAgent_ContextCancelled(t *testing.T) {
 		if _, err := io.WriteString(w, "data: {\"id\":\"e1\",\"author\":\"agent\"}\n\n"); err != nil {
 			t.Errorf("write response: %v", err)
 		}
-		w.(http.Flusher).Flush()
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("ResponseWriter is not an http.Flusher")
+			return
+		}
+		flusher.Flush()
 		<-release
 	}))
 	defer srv.Close()
@@ -353,7 +358,6 @@ func TestRunAgent_EarlyBreak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer c.Close()
 
 	seen := 0
 	for _, err := range c.RunAgent(context.Background(), testRunRequest()) {
@@ -379,7 +383,6 @@ func TestRunAgent_ReadError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer c.Close()
 
 	events, runErr := collect(c.RunAgent(context.Background(), testRunRequest()))
 	if runErr == nil {

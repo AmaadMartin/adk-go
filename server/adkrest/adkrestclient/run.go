@@ -58,7 +58,8 @@ type RunRequest struct {
 	StateDelta map[string]any
 }
 
-// ConformanceMode selects what the server does with the model traffic of a run.
+// ConformanceMode selects what the server does with the model traffic of a
+// run. The zero value asks for no conformance handling.
 type ConformanceMode string
 
 const (
@@ -72,7 +73,6 @@ const (
 type RunOption func(*runOptions)
 
 type runOptions struct {
-	conformance      bool
 	mode             ConformanceMode
 	testCaseDir      string
 	userMessageIndex int
@@ -83,7 +83,6 @@ type runOptions struct {
 // the index of this run's message within the test case.
 func WithConformance(mode ConformanceMode, testCaseDir string, userMessageIndex int) RunOption {
 	return func(o *runOptions) {
-		o.conformance = true
 		o.mode = mode
 		o.testCaseDir = testCaseDir
 		o.userMessageIndex = userMessageIndex
@@ -93,11 +92,10 @@ func WithConformance(mode ConformanceMode, testCaseDir string, userMessageIndex 
 // stateDelta returns the state delta to send, leaving base untouched. Without
 // [WithConformance] that is base itself.
 func (o runOptions) stateDelta(base map[string]any, streaming bool) (map[string]any, error) {
-	if !o.conformance {
-		return base, nil
-	}
 	var key string
 	switch o.mode {
+	case "":
+		return base, nil
 	case ModeRecord:
 		key = recordingsConfigKey
 	case ModeReplay:
