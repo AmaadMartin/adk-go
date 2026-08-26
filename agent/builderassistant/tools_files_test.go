@@ -16,6 +16,7 @@ package builderassistant
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -438,5 +439,33 @@ func skipWhenRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("the superuser is not stopped by directory permissions")
+	}
+}
+
+// TestBatchWritesReportTheSameEscapeEveryTime pins the ordering of a batch
+// write. Go randomises map iteration, so without an ordered walk a batch that
+// holds two bad paths names a different one on each run, and the model sees a
+// different failure every time it retries the same call.
+func TestBatchWritesReportTheSameEscapeEveryTime(t *testing.T) {
+	ctx := newContext(t, newProject(t))
+	files := map[string]string{
+		"../b_escape.go": "package escape\n",
+		"../a_escape.go": "package escape\n",
+	}
+	configs := map[string]string{
+		"../b_escape.yaml": "name: escape\n",
+		"../a_escape.yaml": "name: escape\n",
+	}
+
+	// One run has an even chance of passing by luck; twenty do not.
+	for range 20 {
+		_, err := writeFiles(ctx, writeFilesArgs{Files: files})
+		if !strings.Contains(fmt.Sprint(err), "../a_escape.go") {
+			t.Fatalf("writeFiles reported %v, want it to always name \"../a_escape.go\"", err)
+		}
+		_, err = writeConfigFiles(ctx, writeConfigFilesArgs{Files: configs})
+		if !strings.Contains(fmt.Sprint(err), "../a_escape.yaml") {
+			t.Fatalf("writeConfigFiles reported %v, want it to always name \"../a_escape.yaml\"", err)
+		}
 	}
 }
