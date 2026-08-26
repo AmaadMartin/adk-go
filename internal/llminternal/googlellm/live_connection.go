@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -26,9 +27,20 @@ import (
 )
 
 // LiveConnection wraps the underlying GenAI SDK live session.
+//
+// A LiveConnection is safe for one goroutine calling Recv concurrently with any
+// number of goroutines calling the Send methods. The Send methods are
+// serialised against each other. Ordering between concurrent senders is
+// unspecified; only whole frames are guaranteed.
 type LiveConnection struct {
 	// Using the correct Session type from the GenAI SDK.
 	sdkSession *genai.Session
+
+	// sendMu serialises writes to sdkSession. gorilla/websocket, which the
+	// genai SDK writes through, permits one concurrent writer, and RunLive
+	// sends from two goroutines: the input pump and the loop that answers a
+	// function call.
+	sendMu sync.Mutex
 
 	modelName               string
 	backend                 genai.Backend
@@ -48,6 +60,9 @@ func NewLiveConnection(session *genai.Session, modelName string, backend genai.B
 
 // SendHistory sends the conversation history to prime the session.
 func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Content) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	// TODO: genai seems to be missing initial_history_in_client_content flag
 	isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
 	if isGemini31 {
@@ -95,6 +110,9 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 
 // SendContent sends unary content or function responses to the model.
 func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	if content == nil || len(content.Parts) == 0 {
 		return fmt.Errorf("empty content")
 	}
@@ -142,6 +160,9 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 
 // SendRealtime sends real-time input (audio/video).
 func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	switch v := input.(type) {
 	case *genai.Blob:
 		if v.MIMEType == "" {
@@ -189,6 +210,11 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 }
 
 // Recv receives a response from the live server connection.
+//
+// Exactly one goroutine may call Recv on a connection. Recv takes no lock: it
+// reads rather than writes, and sendMu is deliberately not taken here because
+// the underlying Receive blocks until the server speaks, which would stall
+// every sender for the life of the connection.
 func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 	if len(c.bufferedResponses) > 0 {
 		resp := c.bufferedResponses[0]
@@ -286,6 +312,11 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 }
 
 // Close closes the live server connection.
+//
+// Close deliberately does not take sendMu. The genai SDK sets no write
+// deadline, so a write to a wedged peer blocks until the socket closes, and
+// this Close is what releases it. Taking sendMu here would queue Close behind
+// that write and deadlock teardown.
 func (c *LiveConnection) Close() error {
 	if c.sdkSession != nil {
 		return c.sdkSession.Close()
