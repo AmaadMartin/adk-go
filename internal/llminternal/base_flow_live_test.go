@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,8 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // fakeLiveModel implements model.LLM plus the Client() accessor RunLive
@@ -543,6 +546,101 @@ func TestRunLiveCloseStopsIdleSession(t *testing.T) {
 
 	if got := connCount.Load(); got != 1 {
 		t.Errorf("connection count = %d, want 1 (Close must not trigger a reconnect)", got)
+	}
+	assertNoRunLiveLeak(t, baseline)
+}
+
+// TestRunLiveConcurrentToolResponseAndRealtimeInput exercises the two writers
+// that share one live connection at the reported site: the sender goroutine
+// draining sess.inputCh, and the consumer loop answering a function call.
+//
+// The assertion is the -race verdict and the absence of gorilla's "panic:
+// concurrent write to websocket connection". The overlap is timing-dependent,
+// so this case is a guard on the real call path rather than the deterministic
+// regression test; TestLiveConnectionConcurrentSends in the googlellm package
+// is the deterministic one.
+func TestRunLiveConcurrentToolResponseAndRealtimeInput(t *testing.T) {
+	baseline, _ := runLiveStacks()
+
+	// The fake server issues a tool call as soon as the session is up, so the
+	// consumer loop writes a tool response while the sender pumps audio.
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		toolCall := `{"toolCall":{"functionCalls":[{"id":"call_1","name":"probe","args":{}}]}}`
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(toolCall)); err != nil {
+			return
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+				return
+			}
+		}
+	})
+
+	probe, err := functiontool.New(functiontool.Config{
+		Name:        "probe",
+		Description: "returns a fixed result so the consumer loop writes a tool response",
+	}, func(ctx agent.Context, in struct{}) (struct{ OK bool }, error) {
+		return struct{ OK bool }{OK: true}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New failed: %v", err)
+	}
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		Tools:             []tool.Tool{probe},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var senderDone sync.WaitGroup
+	senderDone.Add(1)
+	go func() {
+		defer senderDone.Done()
+		for range 500 {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// A fresh Blob per send: SendRealtime fills in an empty MIMEType,
+			// so a shared value would be mutated in place.
+			req := agent.LiveRequest{RealtimeInput: &genai.Blob{
+				Data:     []byte{0x00, 0x01, 0x02, 0x03},
+				MIMEType: "audio/pcm",
+			}}
+			if err := sess.Send(req); err != nil {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	sawTurn := false
+	for ev, err := range seq {
+		if err != nil {
+			continue // the post-cancel context.Canceled error is expected
+		}
+		if ev != nil && ev.LLMResponse.Content != nil && !sawTurn {
+			sawTurn = true
+			close(stop)
+			cancel()
+		}
+	}
+	senderDone.Wait()
+
+	if !sawTurn {
+		t.Error("never received a model turn while the tool response and realtime input overlapped")
 	}
 	assertNoRunLiveLeak(t, baseline)
 }
