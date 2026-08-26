@@ -142,10 +142,10 @@ starts with `p-`. The session service applies the delta when it appends that
 event, so the response is the session with the delta already merged. Keys the
 delta does not mention keep their value.
 
-Both `PATCH` bodies accept two spellings of their field. The session route reads
-`stateDelta` or `state_delta`; the memory route reads `sessionId` or
-`session_id`. adk-python accepts both, and its own client sends the snake_case
-one.
+The session route reads `stateDelta` or `state_delta`. It accepts the second
+spelling because adk-python's conformance client hand-writes it when it updates
+a session, while it camel-cases every other call. The memory route reads
+`sessionId` only; no client sends another spelling for it.
 
 ## Failure modes
 
@@ -155,6 +155,7 @@ one.
 | `app-info` for an unknown app | 404 with the loader's error |
 | `app-info` whose root agent is not an LLM agent | 400 |
 | `PATCH` session with a body carrying neither spelling | 400 |
+| `PATCH` memory with a body carrying no `sessionId` | 400 |
 | `PATCH` session or memory for an unknown session | 404 |
 | `PATCH` memory with no memory service configured | 400 |
 
