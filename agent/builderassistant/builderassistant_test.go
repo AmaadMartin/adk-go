@@ -121,8 +121,10 @@ func TestNewCapsTheReplyLength(t *testing.T) {
 	if cfg.GenerateContentConfig == nil {
 		t.Fatal("newAgentConfig set no GenerateContentConfig")
 	}
-	if got := cfg.GenerateContentConfig.MaxOutputTokens; got != maxOutputTokens {
-		t.Errorf("MaxOutputTokens = %d, want %d", got, maxOutputTokens)
+	// The literal, not the constant: 8192 is the cap adk-python pins, and a
+	// test that reads the constant back moves with any change to it.
+	if got := cfg.GenerateContentConfig.MaxOutputTokens; got != 8192 {
+		t.Errorf("MaxOutputTokens = %d, want 8192", got)
 	}
 }
 
