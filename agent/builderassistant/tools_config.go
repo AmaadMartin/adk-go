@@ -17,6 +17,7 @@ package builderassistant
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -123,7 +124,7 @@ func readConfigFiles(ctx agent.Context, args readConfigFilesArgs) (readConfigFil
 	if err != nil {
 		return readConfigFilesResult{}, err
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	result := readConfigFilesResult{
 		Success:    true,
@@ -201,14 +202,14 @@ func writeConfigFiles(ctx agent.Context, args writeConfigFilesArgs) (writeConfig
 	if err != nil {
 		return writeConfigFilesResult{}, err
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	result := writeConfigFilesResult{
 		Success:    true,
 		Files:      make(map[string]fileWrite, len(args.Files)),
 		TotalFiles: len(args.Files),
 	}
-	for _, requested := range sortedKeys(args.Files) {
+	for _, requested := range slices.Sorted(maps.Keys(args.Files)) {
 		rel, err := w.resolve(requested)
 		if err != nil {
 			return writeConfigFilesResult{}, err

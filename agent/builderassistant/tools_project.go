@@ -20,7 +20,6 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"google.golang.org/adk/v2/agent"
@@ -44,7 +43,6 @@ type exploreProjectArgs struct{}
 type projectInfo struct {
 	Name             string `json:"name"`
 	AbsolutePath     string `json:"absolute_path"`
-	IsEmpty          bool   `json:"is_empty"`
 	TotalFiles       int    `json:"total_files"`
 	TotalDirectories int    `json:"total_directories"`
 	HasGoFiles       bool   `json:"has_go_files"`
@@ -88,7 +86,7 @@ func exploreProject(ctx agent.Context, _ exploreProjectArgs) (exploreProjectResu
 	if err != nil {
 		return exploreProjectResult{}, err
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	result := exploreProjectResult{
 		Project:         projectInfo{Name: filepath.Base(w.path), AbsolutePath: w.path},
@@ -132,10 +130,9 @@ func exploreProject(ctx agent.Context, _ exploreProjectArgs) (exploreProjectResu
 	if walkErr != nil {
 		return exploreProjectResult{}, fmt.Errorf("explore the project directory %q: %w", w.path, walkErr)
 	}
-	result.Project.IsEmpty = result.Project.TotalFiles == 0 && result.Project.TotalDirectories == 0
-	sort.Strings(result.Entries)
-	sort.Slice(result.ExistingConfigs, func(i, j int) bool {
-		return result.ExistingConfigs[i].Filename < result.ExistingConfigs[j].Filename
+	slices.Sort(result.Entries)
+	slices.SortFunc(result.ExistingConfigs, func(a, b configSummary) int {
+		return strings.Compare(a.Filename, b.Filename)
 	})
 	return result, nil
 }

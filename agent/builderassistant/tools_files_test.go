@@ -16,6 +16,7 @@ package builderassistant
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,8 +40,8 @@ func TestReadFiles(t *testing.T) {
 	want := readFilesResult{
 		Success: true,
 		Files: map[string]fileRead{
-			"root_agent.yaml": {Content: "name: root\n", FileSize: 11, Exists: true},
-			"tools/search.go": {Content: "package tools\n", FileSize: 14, Exists: true},
+			"root_agent.yaml": {Content: "name: root\n", FileSize: 11},
+			"tools/search.go": {Content: "package tools\n", FileSize: 14},
 		},
 		SuccessfulReads: 2,
 		TotalFiles:      2,
@@ -66,8 +67,8 @@ func TestReadFilesReportsAMissingFileWithoutFailingTheCall(t *testing.T) {
 		t.Errorf("readFiles counted %d of %d reads, want 1 of 2", got.SuccessfulReads, got.TotalFiles)
 	}
 	absent := got.Files["absent.yaml"]
-	if absent.Exists {
-		t.Error("readFiles reported the missing file as existing")
+	if absent.Content != "" || absent.FileSize != 0 {
+		t.Errorf("readFiles returned content for the file it could not read: %+v", absent)
 	}
 	if want := "file does not exist: " + filepath.Join(root, "absent.yaml"); absent.Error != want {
 		t.Errorf("readFiles error = %q, want %q", absent.Error, want)
@@ -438,5 +439,33 @@ func skipWhenRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("the superuser is not stopped by directory permissions")
+	}
+}
+
+// TestBatchWritesReportTheSameEscapeEveryTime pins the ordering of a batch
+// write. Go randomises map iteration, so without an ordered walk a batch that
+// holds two bad paths names a different one on each run, and the model sees a
+// different failure every time it retries the same call.
+func TestBatchWritesReportTheSameEscapeEveryTime(t *testing.T) {
+	ctx := newContext(t, newProject(t))
+	files := map[string]string{
+		"../b_escape.go": "package escape\n",
+		"../a_escape.go": "package escape\n",
+	}
+	configs := map[string]string{
+		"../b_escape.yaml": "name: escape\n",
+		"../a_escape.yaml": "name: escape\n",
+	}
+
+	// One run has an even chance of passing by luck; twenty do not.
+	for range 20 {
+		_, err := writeFiles(ctx, writeFilesArgs{Files: files})
+		if !strings.Contains(fmt.Sprint(err), "../a_escape.go") {
+			t.Fatalf("writeFiles reported %v, want it to always name \"../a_escape.go\"", err)
+		}
+		_, err = writeConfigFiles(ctx, writeConfigFilesArgs{Files: configs})
+		if !strings.Contains(fmt.Sprint(err), "../a_escape.yaml") {
+			t.Fatalf("writeConfigFiles reported %v, want it to always name \"../a_escape.yaml\"", err)
+		}
 	}
 }

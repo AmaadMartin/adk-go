@@ -90,7 +90,7 @@ func openTestWorkspace(t *testing.T, dir string) *workspace {
 	if err != nil {
 		t.Fatalf("openWorkspace(%q) returned error: %v", dir, err)
 	}
-	t.Cleanup(func() { _ = w.Close() })
+	t.Cleanup(w.Close)
 	return w
 }
 
@@ -223,7 +223,7 @@ func TestCreateWorkspaceCreatesTheRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createWorkspace returned error: %v", err)
 	}
-	defer func() { _ = w.Close() }()
+	defer w.Close()
 
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		t.Fatalf("Stat(%q) = %v, %v; want a directory", root, info, err)

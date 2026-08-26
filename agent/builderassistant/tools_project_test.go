@@ -81,7 +81,7 @@ func TestExploreProjectReportsAnEmptyDirectory(t *testing.T) {
 		t.Fatalf("exploreProject returned error: %v", err)
 	}
 	want := exploreProjectResult{
-		Project:         projectInfo{Name: filepath.Base(root), AbsolutePath: root, IsEmpty: true},
+		Project:         projectInfo{Name: filepath.Base(root), AbsolutePath: root},
 		ExistingConfigs: []configSummary{},
 		Entries:         []string{},
 	}
