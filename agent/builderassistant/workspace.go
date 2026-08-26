@@ -103,22 +103,17 @@ func (w *workspace) Close() error {
 // reaching the root by another name is rejected rather than resolved.
 func (w *workspace) resolve(name string) (string, error) {
 	clean := filepath.Clean(sanitizePath(name))
-	if filepath.IsAbs(clean) {
-		// The separator is part of the prefix on purpose: "/srv/rootless"
-		// starts with "/srv/root" but is a different directory.
-		inside, ok := strings.CutPrefix(clean, w.path+string(filepath.Separator))
-		switch {
-		case ok:
-			clean = inside
-		case clean == w.path:
-			clean = "."
-		default:
-			return "", fmt.Errorf("%w: %q", ErrOutsideRoot, name)
-		}
+	// An absolute path inside the sandbox is allowed, but os.Root takes only
+	// relative names, so strip the root prefix. The separator belongs to the
+	// prefix: "/srv/rootless" starts with "/srv/root" yet is another
+	// directory.
+	if inside, ok := strings.CutPrefix(clean, w.path+string(filepath.Separator)); ok {
+		clean = inside
+	} else if clean == w.path {
+		clean = "."
 	}
 	// Stat walks the name through the root handle, so a name that leaves the
-	// sandbox — through "..", or through a symlink — is refused here rather
-	// than at the first read or write.
+	// sandbox is refused here rather than at the first read or write.
 	if _, err := w.root.Stat(clean); isEscape(err) {
 		return "", fmt.Errorf("%w: %q: %w", ErrOutsideRoot, name, err)
 	}
