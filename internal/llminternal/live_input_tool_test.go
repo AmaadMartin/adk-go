@@ -387,6 +387,26 @@ func TestLiveInputStreamingTool_SessionCloseClosesInput(t *testing.T) {
 	probe.awaitFinished(t, "closing the session must close its input channel")
 }
 
+// TestLiveInputStreamingTool_UnregisterClosesInput pins the registry contract:
+// a tool's channel is closed when its registration ends, so a reader the
+// handler left behind cannot outlive the tool.
+func TestLiveInputStreamingTool_UnregisterClosesInput(t *testing.T) {
+	sess := newLiveSessionImpl()
+	t.Cleanup(func() { _ = sess.Close() })
+
+	input := sess.RegisterStreamingTool("finished_tool", "call_1", func() {}, true)
+	sess.UnregisterStreamingTool("finished_tool", "call_1")
+
+	select {
+	case _, open := <-input:
+		if open {
+			t.Error("the channel delivered a request, want it closed")
+		}
+	default:
+		t.Error("unregistering the tool left its input channel open")
+	}
+}
+
 func TestLiveInputStreamingTool_RegisterAfterCloseGetsClosedChannel(t *testing.T) {
 	sess := newLiveSessionImpl()
 	if err := sess.Close(); err != nil {
