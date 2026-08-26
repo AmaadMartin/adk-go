@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
 
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
@@ -453,4 +454,189 @@ func EquateApproxInt(margin int64) cmp.Option {
 
 		return diff <= margin
 	})
+}
+
+func TestUpdateSession(t *testing.T) {
+	id := fakes.SessionKey{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+	const fixedUUID = "fixed-uuid"
+	fixedTime := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+
+	tc := []struct {
+		name           string
+		storedSessions map[fakes.SessionKey]fakes.TestSession
+		appendErr      error
+		// epochTime timestamps the synthetic event at the Unix epoch, which
+		// Session.Validate treats as an empty updatedAt.
+		epochTime  bool
+		sessionID  fakes.SessionKey
+		body       string
+		wantState  map[string]any
+		wantDelta  map[string]any
+		wantErr    error
+		wantStatus int
+	}{
+		{
+			name: "camelCase state delta is merged",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{"keep": "me"}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			sessionID:  id,
+			body:       `{"stateDelta":{"added":"value"}}`,
+			wantState:  map[string]any{"keep": "me", "added": "value"},
+			wantDelta:  map[string]any{"added": "value"},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "snake_case state delta is merged",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{"keep": "me"}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			sessionID:  id,
+			body:       `{"state_delta":{"added":"value"}}`,
+			wantState:  map[string]any{"keep": "me", "added": "value"},
+			wantDelta:  map[string]any{"added": "value"},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "an empty delta object is accepted",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{"keep": "me"}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			sessionID:  id,
+			body:       `{"stateDelta":{}}`,
+			wantState:  map[string]any{"keep": "me"},
+			wantDelta:  map[string]any{},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "user ID is missing in input",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			sessionID:  fakes.SessionKey{AppName: "testApp", SessionID: "testSession"},
+			body:       `{"stateDelta":{"added":"value"}}`,
+			wantErr:    fmt.Errorf("user_id parameter is required"),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "session ID is missing in input",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:      fakes.SessionKey{AppName: "testApp", UserID: "testUser"},
+			body:           `{"stateDelta":{"added":"value"}}`,
+			wantErr:        fmt.Errorf("session_id parameter is required"),
+			wantStatus:     http.StatusBadRequest,
+		},
+		{
+			name: "body is not valid JSON",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			sessionID:  id,
+			body:       `{"stateDelta":`,
+			wantErr:    fmt.Errorf("unexpected EOF"),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "body carries neither spelling",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			sessionID:  id,
+			body:       `{}`,
+			wantErr:    fmt.Errorf("stateDelta is required"),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "session does not exist",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:      id,
+			body:           `{"stateDelta":{"added":"value"}}`,
+			wantErr:        fmt.Errorf("session not found: not found"),
+			wantStatus:     http.StatusNotFound,
+		},
+		{
+			name: "appending the event fails",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			appendErr:  fmt.Errorf("storage is down"),
+			sessionID:  id,
+			body:       `{"stateDelta":{"added":"value"}}`,
+			wantErr:    fmt.Errorf("storage is down"),
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			// The event timestamp becomes the session updatedAt. This pins
+			// that a session models.FromSession rejects produces a 500
+			// rather than an invalid response body.
+			name: "a session that fails validation is rejected",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: fixedTime},
+			},
+			epochTime:  true,
+			sessionID:  id,
+			body:       `{"stateDelta":{"added":"value"}}`,
+			wantErr:    fmt.Errorf("updated_at is empty"),
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tc {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions, AppendErr: tt.appendErr}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			req, err := http.NewRequest(http.MethodPatch, "/apps/testApp/users/testUser/sessions/testSession", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
+			// Pin the event ID and timestamp so the assertions are exact.
+			eventTime := fixedTime
+			if tt.epochTime {
+				eventTime = time.Unix(0, 0)
+			}
+			ctx := platform.WithUUIDProvider(req.Context(), func() string { return fixedUUID })
+			ctx = platform.WithTimeProvider(ctx, func() time.Time { return eventTime })
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			apiController.UpdateSessionHandler(rr, req)
+
+			if status := rr.Code; status != tt.wantStatus {
+				t.Fatalf("UpdateSession() status = %v, want %v; body %q", status, tt.wantStatus, rr.Body.String())
+			}
+			if tt.wantErr != nil {
+				if respErr := strings.Trim(rr.Body.String(), "\n"); tt.wantErr.Error() != respErr {
+					t.Errorf("UpdateSession() error = %q, want %q", respErr, tt.wantErr.Error())
+				}
+				return
+			}
+			var gotSession models.Session
+			if err := json.NewDecoder(rr.Body).Decode(&gotSession); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if diff := cmp.Diff(tt.wantState, gotSession.State); diff != "" {
+				t.Errorf("UpdateSession() state mismatch (-want +got):\n%s", diff)
+			}
+			wantEvents := []models.Event{{
+				ID:           fixedUUID,
+				InvocationID: "p-" + fixedUUID,
+				Author:       "user",
+				Actions: models.EventActions{
+					StateDelta:    tt.wantDelta,
+					ArtifactDelta: map[string]int64{},
+				},
+			}}
+			if diff := cmp.Diff(wantEvents, gotSession.Events); diff != "" {
+				t.Errorf("UpdateSession() events mismatch (-want +got):\n%s", diff)
+			}
+			if got, want := gotSession.UpdatedAt, fixedTime.Unix(); got != want {
+				t.Errorf("UpdateSession() lastUpdateTime = %d, want %d", got, want)
+			}
+		})
+	}
 }

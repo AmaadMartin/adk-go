@@ -38,6 +38,28 @@ type CreateSessionRequest struct {
 	Events []Event        `json:"events"`
 }
 
+// UpdateSessionRequest is the body of PATCH …/sessions/{session_id}.
+//
+// The schema advertises stateDelta, and every other model in this package is
+// camelCase only. This one endpoint also reads state_delta because adk-python's
+// conformance client hand-writes that spelling, in
+// src/google/adk/cli/conformance/adk_web_server_client.py, where update_session
+// posts json={"state_delta": state_delta}. Every other call it makes is
+// camel-cased by model_dump(by_alias=True), so this is the single place a
+// first-party client would otherwise fail against a Go server.
+type UpdateSessionRequest struct {
+	StateDelta      map[string]any `json:"stateDelta"`
+	StateDeltaAlias map[string]any `json:"state_delta"`
+}
+
+// Delta returns the state delta under whichever spelling the caller used.
+func (r UpdateSessionRequest) Delta() map[string]any {
+	if r.StateDelta != nil {
+		return r.StateDelta
+	}
+	return r.StateDeltaAlias
+}
+
 type SessionID struct {
 	ID      string `mapstructure:"session_id,optional"`
 	AppName string `mapstructure:"app_name,required"`
