@@ -87,12 +87,6 @@ func New(cfg Config) (*Client, error) {
 	return &Client{baseURL: baseURL, timeout: timeout, httpClient: httpClient}, nil
 }
 
-// Close releases the idle connections the Client holds. The Client stays
-// usable afterwards.
-func (c *Client) Close() {
-	c.httpClient.CloseIdleConnections()
-}
-
 // Session is the client-side view of a session returned by the server.
 type Session struct {
 	// ID identifies the session within its app and user.

@@ -334,23 +334,6 @@ func TestStatusError_UnreadableBody(t *testing.T) {
 	}
 }
 
-func TestClose(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
-	defer srv.Close()
-
-	c := newTestClient(t, srv.URL)
-	c.Close() // Fresh client.
-
-	if err := c.DeleteSession(context.Background(), "a", "u", "s"); err != nil {
-		t.Fatalf("DeleteSession() error = %v", err)
-	}
-	c.Close() // After a request.
-
-	if err := c.DeleteSession(context.Background(), "a", "u", "s"); err != nil {
-		t.Fatalf("DeleteSession() after Close() error = %v, want the client to stay usable", err)
-	}
-}
-
 var errRead = errors.New("read failed")
 
 type errReader struct{}
@@ -363,7 +346,6 @@ func newTestClient(t *testing.T, baseURL string) *Client {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	t.Cleanup(c.Close)
 	return c
 }
 
