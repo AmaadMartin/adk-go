@@ -16,6 +16,22 @@
 // that interviews a developer about the multi-agent system they want, and then
 // writes the YAML agent configs that ADK's config loader reads.
 //
+// Build one with [New] and drive it with a [runner.Runner]:
+//
+//	llm, err := gemini.NewModel(ctx, "gemini-2.5-pro", &genai.ClientConfig{
+//		APIKey: os.Getenv("GOOGLE_API_KEY"),
+//	})
+//	// handle err
+//	a, err := builderassistant.New(builderassistant.Config{Model: llm})
+//	// handle err
+//	r, err := runner.New(runner.Config{
+//		AppName:           "agent-builder",
+//		Agent:             a,
+//		SessionService:    session.InMemoryService(),
+//		AutoCreateSession: true,
+//	})
+//	// handle err
+//
 // The assistant reads and writes files through a sandbox. Every path a tool
 // receives is resolved against the root directory recorded in the session
 // state under the key "root_directory", and a path that escapes that directory
