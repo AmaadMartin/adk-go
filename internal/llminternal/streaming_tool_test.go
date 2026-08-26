@@ -253,7 +253,7 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	}
 
 	liveSess := newLiveSessionImpl()
-	liveSess.activeTools = make(map[string][]activeTask)
+	liveSess.activeTools = make(map[string][]*activeTask)
 
 	go func() {
 		for range liveSess.inputCh {
