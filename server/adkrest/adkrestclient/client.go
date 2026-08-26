@@ -15,7 +15,9 @@
 // Package adkrestclient is an HTTP client for an ADK web server, the server
 // implemented by [google.golang.org/adk/v2/server/adkrest].
 //
-// It creates, reads and deletes sessions.
+// It creates, reads and deletes sessions, and streams an agent run over
+// Server-Sent Events. [WithConformance] additionally switches the server into
+// conformance record or replay mode.
 package adkrestclient
 
 import (
