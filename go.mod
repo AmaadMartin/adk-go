@@ -45,7 +45,10 @@ require (
 	golang.org/x/mod v0.37.0 // indirect
 )
 
-require github.com/a2aproject/a2a-go/v2 v2.4.0
+require (
+	cloud.google.com/go/spanner v1.91.0
+	github.com/a2aproject/a2a-go/v2 v2.4.0
+)
 
 require (
 	cel.dev/expr v0.25.2 // indirect
