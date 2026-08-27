@@ -290,12 +290,9 @@ func (p *recordPlugin) createInvocationState(ctx agent.InvocationContext) (*invo
 }
 
 func (p *recordPlugin) saveRecordings(state *invocationRecordState) {
-	var filename string
-	if state.streamingMode == "sse" {
-		filename = "generated-recordings-sse.yaml"
-	} else {
-		filename = "generated-recordings.yaml"
-	}
+	// saveRecordings cannot report an error, so an unsupported mode keeps writing
+	// the non-streaming file, as it did before this mapping moved to recording.
+	filename, _ := recording.RecordingsFileName(state.streamingMode)
 
 	filePath := filepath.Join(state.caseDir, filename)
 

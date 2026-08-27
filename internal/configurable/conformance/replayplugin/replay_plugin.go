@@ -27,8 +27,11 @@ package replayplugin
 //
 // Replay configuration is expected in the session state under the key "_adk_replay_config",
 // containing:
-//   - "dir": Path to the directory containing "generated-recordings.yaml".
+//   - "dir": Path to the directory containing the recordings file.
 //   - "user_message_index": The index of the user message to replay.
+//   - "streaming_mode": Optional. "sse" reads "generated-recordings-sse.yaml".
+//     "none", an empty value or an absent key reads "generated-recordings.yaml".
+//     Any other value is an error.
 
 import (
 	"encoding/json"
@@ -297,7 +300,12 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 	}
 
 	// 3. Load Recordings File
-	recordingsPath := filepath.Join(requestedAbsPath, "generated-recordings.yaml")
+	recordingsFile, err := recording.RecordingsFileName(config["streaming_mode"])
+	if err != nil {
+		return nil, fmt.Errorf("replay config error: %w", err)
+	}
+
+	recordingsPath := filepath.Join(requestedAbsPath, recordingsFile)
 
 	// Check if file exists
 	if _, err := os.Stat(recordingsPath); os.IsNotExist(err) {
