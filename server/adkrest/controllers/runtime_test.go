@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -91,12 +92,18 @@ func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
 	}
 }
 
+// recorderWithDeadline records every SetWriteDeadline call, so a test can
+// assert whether the handler armed a deadline, and can make the call fail.
 type recorderWithDeadline struct {
 	*httptest.ResponseRecorder
+
+	deadlines   []time.Time
+	deadlineErr error
 }
 
 func (r *recorderWithDeadline) SetWriteDeadline(t time.Time) error {
-	return nil
+	r.deadlines = append(r.deadlines, t)
+	return r.deadlineErr
 }
 
 type testAgentResult struct {
@@ -168,62 +175,14 @@ func TestRunSSEHandler(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup fake agent with testAgent(tt.results)
-			fakeAgent, err := agent.New(agent.Config{
-				Name: "testApp",
-				Run:  testAgent(tt.results),
-			})
-			if err != nil {
-				t.Fatalf("agent.New failed: %v", err)
-			}
-
-			// Setup fake session service
-			id := fakes.SessionKey{
-				AppName:   "testApp",
-				UserID:    "testUser",
-				SessionID: "testSession",
-			}
-			sessionService := fakes.FakeSessionService{
-				Sessions: map[fakes.SessionKey]fakes.TestSession{
-					id: {
-						Id:            id,
-						SessionState:  fakes.TestState{},
-						SessionEvents: fakes.TestEvents{},
-						UpdatedAt:     time.Now(),
-					},
-				},
-			}
-
-			// Setup controller
-			controller := NewRuntimeAPIController(
-				&sessionService,
-				nil,
-				agent.NewSingleLoader(fakeAgent),
-				nil,
-				10*time.Second,
-				runner.PluginConfig{},
-				false,
-			)
-
-			// Create request
-			reqObj := models.RunAgentRequest{
-				AppName:   "testApp",
-				UserId:    "testUser",
-				SessionId: "testSession",
-				Streaming: true,
-				NewMessage: genai.Content{
-					Parts: []*genai.Part{{Text: "Hello"}},
-				},
-			}
-			reqBytes, _ := json.Marshal(reqObj)
-			req := httptest.NewRequest(http.MethodPost, "/run-sse", bytes.NewBuffer(reqBytes))
+			controller := newRunSSEController(t, tt.results, 10*time.Second)
 
 			// Record response
 			rr := httptest.NewRecorder()
-			w := &recorderWithDeadline{rr}
+			w := &recorderWithDeadline{ResponseRecorder: rr}
 
 			// Call handler
-			controller.RunSSEHandler(w, req)
+			controller.RunSSEHandler(w, newRunSSERequest(t))
 
 			// Verify response
 			if rr.Code != tt.wantStatus {
@@ -238,6 +197,134 @@ func TestRunSSEHandler(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunSSEHandler_WriteDeadline pins how RunSSEHandler reads the configured
+// SSE write timeout. Only a positive timeout may arm a write deadline.
+func TestRunSSEHandler_WriteDeadline(t *testing.T) {
+	tc := []struct {
+		name          string
+		sseTimeout    time.Duration
+		deadlineErr   error
+		wantDeadlines int
+		wantStatus    int
+		wantBody      string
+	}{
+		{
+			name:          "zero timeout arms no deadline",
+			sseTimeout:    0,
+			wantDeadlines: 0,
+			wantStatus:    http.StatusOK,
+			wantBody:      "data: {",
+		},
+		{
+			name:          "negative timeout arms no deadline",
+			sseTimeout:    -time.Second,
+			wantDeadlines: 0,
+			wantStatus:    http.StatusOK,
+			wantBody:      "data: {",
+		},
+		{
+			name:          "positive timeout arms one deadline",
+			sseTimeout:    10 * time.Second,
+			wantDeadlines: 1,
+			wantStatus:    http.StatusOK,
+			wantBody:      "data: {",
+		},
+		{
+			name:          "deadline error returns 500",
+			sseTimeout:    10 * time.Second,
+			deadlineErr:   errors.New("deadlines are not supported"),
+			wantDeadlines: 1,
+			wantStatus:    http.StatusInternalServerError,
+			wantBody:      "failed to set write deadline",
+		},
+	}
+
+	for _, tt := range tc {
+		t.Run(tt.name, func(t *testing.T) {
+			results := []testAgentResult{{event: makeEvent("invocation-1", "testApp", "Hello from agent")}}
+			controller := newRunSSEController(t, results, tt.sseTimeout)
+			rr := httptest.NewRecorder()
+			w := &recorderWithDeadline{ResponseRecorder: rr, deadlineErr: tt.deadlineErr}
+
+			start := time.Now()
+			controller.RunSSEHandler(w, newRunSSERequest(t))
+
+			if got := len(w.deadlines); got != tt.wantDeadlines {
+				t.Errorf("SetWriteDeadline call count = %d, want %d", got, tt.wantDeadlines)
+			}
+			for _, deadline := range w.deadlines {
+				if !deadline.After(start) {
+					t.Errorf("write deadline = %v, want a time after %v", deadline, start)
+				}
+			}
+			if rr.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rr.Code, tt.wantStatus)
+			}
+			if body := rr.Body.String(); !strings.Contains(body, tt.wantBody) {
+				t.Errorf("body = %q, want it to contain %q", body, tt.wantBody)
+			}
+		})
+	}
+}
+
+// newRunSSEController builds a controller whose agent yields results, backed
+// by a fake session service holding the testApp/testUser/testSession session.
+func newRunSSEController(t *testing.T, results []testAgentResult, sseTimeout time.Duration) *RuntimeAPIController {
+	t.Helper()
+	fakeAgent, err := agent.New(agent.Config{
+		Name: "testApp",
+		Run:  testAgent(results),
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+
+	id := fakes.SessionKey{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+	sessionService := fakes.FakeSessionService{
+		Sessions: map[fakes.SessionKey]fakes.TestSession{
+			id: {
+				Id:            id,
+				SessionState:  fakes.TestState{},
+				SessionEvents: fakes.TestEvents{},
+				UpdatedAt:     time.Now(),
+			},
+		},
+	}
+
+	return NewRuntimeAPIController(
+		&sessionService,
+		nil,
+		agent.NewSingleLoader(fakeAgent),
+		nil,
+		sseTimeout,
+		runner.PluginConfig{},
+		false,
+	)
+}
+
+// newRunSSERequest builds a /run_sse request for the session that
+// newRunSSEController creates.
+func newRunSSERequest(t *testing.T) *http.Request {
+	t.Helper()
+	reqBytes, err := json.Marshal(models.RunAgentRequest{
+		AppName:   "testApp",
+		UserId:    "testUser",
+		SessionId: "testSession",
+		Streaming: true,
+		NewMessage: genai.Content{
+			Parts: []*genai.Part{{Text: "Hello"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal RunAgentRequest failed: %v", err)
+	}
+	return httptest.NewRequest(http.MethodPost, "/run-sse", bytes.NewBuffer(reqBytes))
 }
 
 func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {

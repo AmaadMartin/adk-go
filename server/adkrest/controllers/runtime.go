@@ -97,13 +97,16 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
-	// set custom deadlines for this request - it overrides server-wide timeouts
+	// A positive timeout sets a custom deadline for this request, which
+	// overrides server-wide timeouts. A zero or negative timeout means no
+	// SSE-specific deadline, so the server-wide timeouts stay in place: a
+	// deadline of now+0 has already expired and fails the first write.
 	rc := http.NewResponseController(rw)
-	deadline := time.Now().Add(c.sseTimeout)
-	err := rc.SetWriteDeadline(deadline)
-	if err != nil {
-		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
-		return
+	if c.sseTimeout > 0 {
+		if err := rc.SetWriteDeadline(time.Now().Add(c.sseTimeout)); err != nil {
+			http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	runAgentRequest, err := decodeRequestBody(req)
