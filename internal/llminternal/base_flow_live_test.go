@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"math"
@@ -42,9 +43,23 @@ import (
 // type-asserts on, backed by a genai client pointed at a fake websocket server.
 type fakeLiveModel struct {
 	client *genai.Client
+	// name overrides the reported model name, and backend the reported
+	// variant. The connection branches on both, so a test that needs a
+	// model-specific send path sets them. The zero backend is
+	// BackendUnspecified, which is what a model that reports no variant at all
+	// resolves to.
+	name    string
+	backend genai.Backend
 }
 
-func (m *fakeLiveModel) Name() string { return "test-live-model" }
+func (m *fakeLiveModel) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "test-live-model"
+}
+
+func (m *fakeLiveModel) GetGoogleLLMVariant() genai.Backend { return m.backend }
 
 func (m *fakeLiveModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {}
@@ -321,6 +336,57 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			wantConns: 2,
 		},
 		{
+			// Same connection-loss shape again, but the queued request only
+			// sets AudioStreamEnd, so the sender fails inside the
+			// audio-stream-end branch. That branch needs the same guarded
+			// errChan send as its siblings or it strands the sender.
+			name: "audio stream end sender error after connection loss does not leak",
+			serveConn: func(connNum int, conn *websocket.Conn) {
+				if connNum == 1 {
+					return
+				}
+				for {
+					if _, _, err := conn.ReadMessage(); err != nil {
+						return
+					}
+					if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+						return
+					}
+				}
+			},
+			drive: func(t *testing.T, sess agent.LiveSession, seq iter.Seq2[*session.Event, error], cancel context.CancelFunc) {
+				stop := make(chan struct{})
+				go func() {
+					for range 200 {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						if err := sess.Send(agent.LiveRequest{AudioStreamEnd: true}); err != nil {
+							return
+						}
+						time.Sleep(5 * time.Millisecond)
+					}
+				}()
+				sawTurn := false
+				for ev, err := range seq {
+					if err != nil {
+						continue
+					}
+					if ev != nil && ev.LLMResponse.Content != nil && !sawTurn {
+						sawTurn = true
+						close(stop)
+						cancel()
+					}
+				}
+				if !sawTurn {
+					t.Error("never received a model turn for the retried audio-stream-end send")
+				}
+			},
+			wantConns: 2,
+		},
+		{
 			// A close frame with a non-resumable code must surface as an error
 			// to the caller and terminate the flow after a single connection.
 			//
@@ -394,6 +460,213 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			assertNoRunLiveLeak(t, baseline)
 		})
 	}
+}
+
+// clientFrame is the subset of the Gemini Live client protocol these tests
+// assert on. Decoding the frame keeps the assertions on the wire contract
+// rather than on the SDK's byte layout.
+//
+// The field names are the wire names, and two of them differ from the SDK's
+// parameter struct: a Blob passed as Media arrives as mediaChunks, and
+// turnComplete is a plain bool tagged omitempty, so an incomplete turn is
+// expressed by leaving the field out.
+type clientFrame struct {
+	RealtimeInput *struct {
+		AudioStreamEnd bool          `json:"audioStreamEnd"`
+		MediaChunks    []*genai.Blob `json:"mediaChunks"`
+		Text           string        `json:"text"`
+	} `json:"realtimeInput"`
+	ClientContent *struct {
+		Turns        []*genai.Content `json:"turns"`
+		TurnComplete bool             `json:"turnComplete"`
+	} `json:"clientContent"`
+}
+
+// collectClientFrames runs one live session against a fake server that records
+// every frame the client sends, then returns the frames sent after setup.
+//
+// send drives the session; the fake server answers each frame with a model
+// turn, so the caller can wait for wantFrames to arrive rather than sleeping.
+// m selects the model-specific send path; the zero value is the default, and
+// the helper fills in its client.
+func collectClientFrames(t *testing.T, m fakeLiveModel, wantFrames int, send func(sess agent.LiveSession) error) []clientFrame {
+	t.Helper()
+	baseline, _ := runLiveStacks()
+
+	frames := make(chan []byte, 16)
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			frames <- data
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+				return
+			}
+		}
+	})
+
+	m.client = client
+	f := &Flow{
+		Model:             &m,
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range seq {
+		}
+	}()
+
+	if err := send(sess); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	var got []clientFrame
+	deadline := time.After(10 * time.Second)
+	for len(got) < wantFrames {
+		select {
+		case data := <-frames:
+			var frame clientFrame
+			if err := json.Unmarshal(data, &frame); err != nil {
+				t.Fatalf("decoding client frame %q failed: %v", data, err)
+			}
+			got = append(got, frame)
+		case <-deadline:
+			t.Fatalf("received %d client frames, want %d", len(got), wantFrames)
+		}
+	}
+
+	cancel()
+	<-done
+	assertNoRunLiveLeak(t, baseline)
+	return got
+}
+
+// TestRunLiveSendsAudioStreamEnd pins the wire frame the flow emits for an
+// audio-stream-end request, and the precedence rule when realtime input is set
+// on the same request.
+func TestRunLiveSendsAudioStreamEnd(t *testing.T) {
+	t.Run("audio stream end sends a realtime input frame", func(t *testing.T) {
+		frames := collectClientFrames(t, fakeLiveModel{}, 1, func(sess agent.LiveSession) error {
+			return sess.Send(agent.LiveRequest{AudioStreamEnd: true})
+		})
+		if frames[0].RealtimeInput == nil {
+			t.Fatalf("frame 0 = %+v, want a realtimeInput frame", frames[0])
+		}
+		if !frames[0].RealtimeInput.AudioStreamEnd {
+			t.Error("realtimeInput.audioStreamEnd = false, want true")
+		}
+	})
+
+	t.Run("realtime input wins over audio stream end", func(t *testing.T) {
+		// A plain content request follows the combined one. If the combined
+		// request wrongly emitted a second frame, that frame lands here as
+		// frame 1 and the content frame never arrives, so a missing suppression
+		// fails rather than passing unnoticed.
+		frames := collectClientFrames(t, fakeLiveModel{}, 2, func(sess agent.LiveSession) error {
+			err := sess.Send(agent.LiveRequest{
+				RealtimeInput:  &genai.Blob{Data: []byte{0, 1, 2, 3}, MIMEType: "audio/pcm"},
+				AudioStreamEnd: true,
+			})
+			if err != nil {
+				return err
+			}
+			return sess.Send(agent.LiveRequest{
+				Content: genai.NewContentFromText("done", genai.RoleUser),
+			})
+		})
+		if frames[0].RealtimeInput == nil || len(frames[0].RealtimeInput.MediaChunks) == 0 {
+			t.Fatalf("frame 0 = %+v, want the realtime media frame", frames[0])
+		}
+		if frames[0].RealtimeInput.AudioStreamEnd {
+			t.Error("frame 0 carried audioStreamEnd, want the realtime input to suppress it")
+		}
+		if frames[1].ClientContent == nil {
+			t.Errorf("frame 1 = %+v, want the following clientContent frame", frames[1])
+		}
+	})
+}
+
+// TestRunLiveSendsTurnComplete pins how Partial reaches the model: a partial
+// request must not complete the turn.
+func TestRunLiveSendsTurnComplete(t *testing.T) {
+	tests := []struct {
+		name             string
+		partial          bool
+		wantTurnComplete bool
+	}{
+		{name: "a complete turn sets turnComplete", wantTurnComplete: true},
+		{name: "a partial turn clears turnComplete", partial: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			frames := collectClientFrames(t, fakeLiveModel{}, 1, func(sess agent.LiveSession) error {
+				return sess.Send(agent.LiveRequest{
+					Content: genai.NewContentFromText("still typing", genai.RoleUser),
+					Partial: tc.partial,
+				})
+			})
+			if frames[0].ClientContent == nil {
+				t.Fatalf("frame 0 = %+v, want a clientContent frame", frames[0])
+			}
+			if frames[0].RealtimeInput != nil {
+				t.Errorf("frame 0 also carried realtimeInput %+v, want only clientContent", frames[0].RealtimeInput)
+			}
+			if got := frames[0].ClientContent.TurnComplete; got != tc.wantTurnComplete {
+				t.Errorf("clientContent.turnComplete = %v, want %v", got, tc.wantTurnComplete)
+			}
+		})
+	}
+}
+
+// TestRunLivePartialSkipsGemini31TextPath covers the one send path that only
+// some models take. Gemini 3.1 on the Gemini API sends a lone text part as
+// realtime input, which always completes the turn, so a partial request has to
+// fall back to a client-content frame.
+func TestRunLivePartialSkipsGemini31TextPath(t *testing.T) {
+	gemini31Model := fakeLiveModel{name: "gemini-3.1-flash-live", backend: genai.BackendGeminiAPI}
+
+	t.Run("a complete turn uses the realtime text path", func(t *testing.T) {
+		frames := collectClientFrames(t, gemini31Model, 1, func(sess agent.LiveSession) error {
+			return sess.Send(agent.LiveRequest{
+				Content: genai.NewContentFromText("hello", genai.RoleUser),
+			})
+		})
+		if frames[0].RealtimeInput == nil {
+			t.Fatalf("frame 0 = %+v, want a realtimeInput frame", frames[0])
+		}
+		if got := frames[0].RealtimeInput.Text; got != "hello" {
+			t.Errorf("realtimeInput.text = %q, want %q", got, "hello")
+		}
+	})
+
+	t.Run("a partial turn falls back to client content", func(t *testing.T) {
+		frames := collectClientFrames(t, gemini31Model, 1, func(sess agent.LiveSession) error {
+			return sess.Send(agent.LiveRequest{
+				Content: genai.NewContentFromText("still typing", genai.RoleUser),
+				Partial: true,
+			})
+		})
+		if frames[0].RealtimeInput != nil {
+			t.Fatalf("frame 0 = %+v, want a clientContent frame: the realtime text path completes the turn", frames[0].RealtimeInput)
+		}
+		if frames[0].ClientContent == nil {
+			t.Fatalf("frame 0 = %+v, want a clientContent frame", frames[0])
+		}
+		if frames[0].ClientContent.TurnComplete {
+			t.Error("clientContent.turnComplete = true, want false for a partial turn")
+		}
+	})
 }
 
 // liveHistoryProcessor populates req.Contents with a turn the SDK cannot
