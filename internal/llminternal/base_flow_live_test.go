@@ -294,8 +294,6 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 							return
 						default:
 						}
-						// A fresh Blob per send: SendRealtime fills in an empty
-						// MIMEType, so a shared value would be mutated in place.
 						req := agent.LiveRequest{RealtimeInput: &genai.Blob{
 							Data:     []byte{0x00, 0x01, 0x02, 0x03},
 							MIMEType: "audio/pcm",
@@ -615,8 +613,6 @@ func TestRunLiveConcurrentToolResponseAndRealtimeInput(t *testing.T) {
 				return
 			default:
 			}
-			// A fresh Blob per send: SendRealtime fills in an empty MIMEType,
-			// so a shared value would be mutated in place.
 			req := agent.LiveRequest{RealtimeInput: &genai.Blob{
 				Data:     []byte{0x00, 0x01, 0x02, 0x03},
 				MIMEType: "audio/pcm",
