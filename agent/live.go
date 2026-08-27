@@ -44,6 +44,9 @@ type LiveRunConfig struct {
 	EnableAffectiveDialog    bool
 	Proactivity              *genai.ProactivityConfig
 	SessionResumption        *genai.SessionResumptionConfig
-	SaveLiveBlob             bool
-	MaxLLMCalls              int
+	// SaveLiveBlob saves realtime input blobs and model output blobs as
+	// artifacts. Only a blob with an explicit "audio/..." MIME type is saved; a
+	// blob with no MIME type is not assumed to be audio and is left out.
+	SaveLiveBlob bool
+	MaxLLMCalls  int
 }

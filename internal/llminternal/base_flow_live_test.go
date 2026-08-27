@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"iter"
@@ -32,7 +33,9 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
+	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -544,5 +547,115 @@ func TestRunLiveCloseStopsIdleSession(t *testing.T) {
 	if got := connCount.Load(); got != 1 {
 		t.Errorf("connection count = %d, want 1 (Close must not trigger a reconnect)", got)
 	}
+	assertNoRunLiveLeak(t, baseline)
+}
+
+// TestRunLiveSavesOnlyLabelledAudioBlobs is the end-to-end reproduction of the
+// reported corruption: a live agent with SaveLiveBlob streams a video frame
+// that carries no MIME type, then a labelled audio chunk. Only the audio chunk
+// belongs in the saved input_audio artifact.
+//
+// It runs the real flow over the websocket fake with a real in-memory artifact
+// service, so the assertion is on the bytes an operator would play back.
+func TestRunLiveSavesOnlyLabelledAudioBlobs(t *testing.T) {
+	baseline, _ := runLiveStacks()
+
+	pngFrame := []byte("\x89PNG\r\n\x1a\n")
+	pcmChunk := []byte("labelled-pcm-audio")
+
+	// The fake server answers only after both realtime frames have arrived, so
+	// the turn always completes with both chunks already offered to the cache.
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		for range 2 {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+			return
+		}
+		blockUntilClientCloses(conn)
+	})
+
+	sessionService := session.InMemoryService()
+	createResp, err := sessionService.Create(t.Context(), &session.CreateRequest{
+		AppName:   "liveApp",
+		UserID:    "liveUser",
+		SessionID: "liveSession",
+	})
+	if err != nil {
+		t.Fatalf("Create session failed: %v", err)
+	}
+	artifacts := &artifactinternal.Artifacts{
+		Service:   artifact.InMemoryService(),
+		AppName:   "liveApp",
+		UserID:    "liveUser",
+		SessionID: "liveSession",
+	}
+
+	testAgent, err := agent.New(agent.Config{Name: "test-live-agent"})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	baseCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(baseCtx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi,
+			Live:          &agent.LiveRunConfig{SaveLiveBlob: true},
+		}),
+		icontext.InvocationContextParams{
+			Agent:     testAgent,
+			Artifacts: artifacts,
+			Session:   createResp.Session,
+		},
+	)
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	liveSess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	// The unlabelled frame first, so a cache that accepted it would put its
+	// bytes in front of the audio.
+	for _, blob := range []*genai.Blob{{Data: pngFrame}, {Data: pcmChunk, MIMEType: "audio/pcm"}} {
+		if err := liveSess.Send(agent.LiveRequest{RealtimeInput: blob}); err != nil {
+			t.Fatalf("Send failed: %v", err)
+		}
+	}
+
+	var savedName string
+	for ev, err := range seq {
+		if err != nil || ev == nil || ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part.FileData == nil || !strings.Contains(part.FileData.FileURI, "input_audio") {
+				continue
+			}
+			savedName = part.FileData.FileURI[strings.LastIndex(part.FileData.FileURI, "/")+1:]
+			savedName, _, _ = strings.Cut(savedName, "#")
+			cancel()
+		}
+	}
+	if savedName == "" {
+		t.Fatal("the turn completed without flushing an input_audio artifact")
+	}
+
+	loaded, err := artifacts.Load(t.Context(), savedName)
+	if err != nil {
+		t.Fatalf("Load artifact %q failed: %v", savedName, err)
+	}
+	if loaded == nil || loaded.Part == nil || loaded.Part.InlineData == nil {
+		t.Fatalf("artifact %q has no inline data", savedName)
+	}
+	if !bytes.Equal(loaded.Part.InlineData.Data, pcmChunk) {
+		t.Errorf("saved input audio = %q, want only the labelled chunk %q", loaded.Part.InlineData.Data, pcmChunk)
+	}
+
 	assertNoRunLiveLeak(t, baseline)
 }
