@@ -52,12 +52,15 @@ func NewAgentEngineAPIController(service session.Service, sseTimeout time.Durati
 
 // Query provides a way to invoke all the methods
 func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Request) {
-	deadline := time.Now().Add(c.sseTimeout)
 	rc := http.NewResponseController(rw)
-	err := rc.SetWriteDeadline(deadline)
-	if err != nil {
-		// ignore the error
-		log.Printf("SetWriteDeadline failed: %v", err)
+	// A non-positive timeout means "no SSE deadline": arming one would set a
+	// deadline in the past and fail every subsequent write. Leave whatever
+	// deadline the embedding http.Server configured in force instead.
+	if c.sseTimeout > 0 {
+		if err := rc.SetWriteDeadline(time.Now().Add(c.sseTimeout)); err != nil {
+			// ignore the error
+			log.Printf("SetWriteDeadline failed: %v", err)
+		}
 	}
 	query := models.Query{}
 	var payload []byte
@@ -79,7 +82,7 @@ func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Reque
 		}
 	}
 
-	err = c.handleQuery(req.Context(), rw, payload, query.ClassMethod)
+	err := c.handleQuery(req.Context(), rw, payload, query.ClassMethod)
 	if err != nil {
 		log.Printf("handleQuery failed: %v", err)
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
