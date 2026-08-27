@@ -42,12 +42,11 @@ type inMemoryService struct {
 	artifacts omap.Map[string, *artifactEntry]
 }
 
-// artifactEntry is a stored artifact payload together with the version
-// metadata recorded when the artifact was saved.
+// artifactEntry is a stored artifact payload together with the time it was
+// saved, which cannot be recovered from the key.
 type artifactEntry struct {
-	part         *genai.Part
-	canonicalURI string
-	createTime   time.Time
+	part       *genai.Part
+	createTime time.Time
 }
 
 // InMemoryService returns a new in-memory artifact service.
@@ -180,13 +179,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
 		nextVersion = internalVer + 1
 	}
-	// The URI is built from the request's session, not from the user scope key
-	// that may have replaced it above.
-	entry := &artifactEntry{
-		part:         artifact,
-		canonicalURI: memoryCanonicalURI(appName, userID, req.SessionID, fileName, nextVersion),
-		createTime:   platform.Now(ctx),
-	}
+	entry := &artifactEntry{part: artifact, createTime: platform.Now(ctx)}
 	s.set(appName, userID, sessionID, fileName, nextVersion, entry)
 	return &SaveResponse{Version: nextVersion}, nil
 }
@@ -348,7 +341,7 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 	return &GetArtifactVersionResponse{
 		ArtifactVersion: &ArtifactVersion{
 			Version:      version,
-			CanonicalURI: entry.canonicalURI,
+			CanonicalURI: memoryCanonicalURI(appName, userID, req.SessionID, fileName, version),
 			// The in-memory service cannot be given custom metadata, but the
 			// field is always non-nil, as in gcsartifact.
 			CustomMetadata: map[string]any{},
