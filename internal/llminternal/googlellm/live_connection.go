@@ -94,7 +94,10 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 }
 
 // SendContent sends unary content or function responses to the model.
-func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content) error {
+//
+// A partial send is an intermediate update: it reaches the model's context but
+// does not complete the current turn. It has no effect on function responses.
+func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content, partial bool) error {
 	if content == nil || len(content.Parts) == 0 {
 		return fmt.Errorf("empty content")
 	}
@@ -116,7 +119,9 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 	} else {
 		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
 		isGeminiAPI := c.backend == genai.BackendGeminiAPI
-		if isGemini31 && isGeminiAPI && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+		// The realtime-text fast path always completes the turn, so a partial
+		// update cannot use it.
+		if !partial && isGemini31 && isGeminiAPI && len(content.Parts) == 1 && content.Parts[0].Text != "" {
 			log.Printf("Attempting to send text via SendRealtimeInput\n")
 			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Text: content.Parts[0].Text,
@@ -127,7 +132,7 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 			return nil
 		}
 
-		turnComplete := true
+		turnComplete := !partial
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
 			Turns:        []*genai.Content{content},
 			TurnComplete: &turnComplete,
@@ -183,6 +188,10 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 		return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 			ActivityEnd: v,
 		})
+	case *genai.LiveRealtimeInput:
+		// A pre-built frame, so any realtime field the SDK grows stays
+		// reachable without a new case here.
+		return c.sdkSession.SendRealtimeInput(*v)
 	default:
 		return fmt.Errorf("unsupported real-time input type: %T", input)
 	}

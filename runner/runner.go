@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"time"
 
 	"google.golang.org/genai"
@@ -372,35 +373,53 @@ type runnerLiveSession struct {
 	storedSession session.Session
 }
 
+// hasFunctionResponse reports whether content replies to a tool call rather
+// than carrying user input. Such a reply is recorded by the flow, not here.
+func hasFunctionResponse(content *genai.Content) bool {
+	for _, part := range content.Parts {
+		if part.FunctionResponse != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
-	err := s.sess.Send(req)
-	if err != nil {
+	if err := s.sess.Send(req); err != nil {
 		return err
 	}
 
-	// Save user text content to session history
-	if req.Content != nil && len(req.Content.Parts) > 0 {
-		// Skip function responses - they are handled separately
-		isFunctionResponse := false
-		for _, part := range req.Content.Parts {
-			if part.FunctionResponse != nil {
-				isFunctionResponse = true
-				break
-			}
+	// A partial turn is an intermediate update, so it stays out of history.
+	hasContent := req.Content != nil && len(req.Content.Parts) > 0
+	if hasContent && !req.Partial && !hasFunctionResponse(req.Content) {
+		event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
+		event.Author = "user"
+		event.LLMResponse = model.LLMResponse{
+			Content: req.Content,
 		}
-
-		if !isFunctionResponse {
-			event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
-			event.Author = "user"
-			event.LLMResponse = model.LLMResponse{
-				Content: req.Content,
-			}
-			if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
-				return fmt.Errorf("failed to add user event to session: %w", err)
-			}
+		// The state delta rides on the user content event, so a request never
+		// appends two events. session.NewEvent allocates Actions.StateDelta:
+		// copy into it rather than replacing it, because an empty map and a nil
+		// map mean different things on the wire, and the caller keeps ownership
+		// of the map it passed.
+		maps.Copy(event.Actions.StateDelta, req.StateDelta)
+		if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
+			return fmt.Errorf("failed to add user event to session: %w", err)
 		}
+		return nil
 	}
 
+	// No user content event to carry the state changes, so apply them on an
+	// event of their own.
+	if len(req.StateDelta) == 0 {
+		return nil
+	}
+	event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
+	event.Author = "user"
+	maps.Copy(event.Actions.StateDelta, req.StateDelta)
+	if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
+		return fmt.Errorf("failed to add state delta event to session: %w", err)
+	}
 	return nil
 }
 
