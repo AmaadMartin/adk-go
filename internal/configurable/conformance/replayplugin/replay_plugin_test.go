@@ -464,9 +464,11 @@ recordings:
 		{name: "None_ReadsNonStreamingFile", streamingMode: "none", seedMode: true, wantText: "non-streaming response"},
 		{name: "Absent_ReadsNonStreamingFile", wantText: "non-streaming response"},
 		{name: "Nil_ReadsNonStreamingFile", streamingMode: nil, seedMode: true, wantText: "non-streaming response"},
-		{name: "Unsupported_ReturnsError", streamingMode: "bidi", seedMode: true, wantErrContains: `unsupported streaming mode: "bidi"`},
-		{name: "EmptyString_ReturnsError", streamingMode: "", seedMode: true, wantErrContains: `unsupported streaming mode: ""`},
-		{name: "NonString_ReturnsError", streamingMode: 42, seedMode: true, wantErrContains: "'streaming_mode' is not a string"},
+		// The record plugin normalizes an empty mode to non-streaming, so replay
+		// must read the file that a config with an empty mode records into.
+		{name: "EmptyString_ReadsNonStreamingFile", streamingMode: "", seedMode: true, wantText: "non-streaming response"},
+		{name: "Unsupported_ReturnsError", streamingMode: "bidi", seedMode: true, wantErrContains: "unsupported streaming mode: bidi"},
+		{name: "NonString_ReturnsError", streamingMode: 42, seedMode: true, wantErrContains: "unsupported streaming mode: 42"},
 		{name: "SSEFileMissing_ReturnsError", streamingMode: "sse", seedMode: true, omitSSEFile: true, wantErrContains: "generated-recordings-sse.yaml"},
 	}
 

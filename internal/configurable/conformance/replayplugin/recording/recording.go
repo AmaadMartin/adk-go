@@ -15,10 +15,31 @@
 package recording
 
 import (
+	"fmt"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 )
+
+// RecordingsFileName returns the name of the file that holds the recordings for
+// a streaming mode. The record and replay plugins both call it, so the two
+// always agree on the name.
+//
+// An absent, nil or empty mode selects the non-streaming file. An unsupported
+// mode returns an error, along with the non-streaming file name so that a
+// caller which cannot report the error still has a usable name.
+func RecordingsFileName(streamingMode any) (string, error) {
+	const nonStreaming = "generated-recordings.yaml"
+	switch streamingMode {
+	case nil, "", "none":
+		return nonStreaming, nil
+	case "sse":
+		return "generated-recordings-sse.yaml", nil
+	default:
+		return nonStreaming, fmt.Errorf("unsupported streaming mode: %v", streamingMode)
+	}
+}
 
 // Recordings represents all recordings in chronological order.
 type Recordings struct {
