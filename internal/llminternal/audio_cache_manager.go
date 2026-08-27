@@ -48,34 +48,36 @@ func NewAudioCacheManager() *AudioCacheManager {
 	}
 }
 
-// CacheInput caches incoming user audio data.
+// CacheInput caches incoming user audio data. It caches a chunk only when the
+// chunk carries an explicit "audio/..." MIME type. An unknown (empty) MIME type
+// is not assumed to be audio, so unlabelled video frames are never spliced into
+// the saved user audio.
 func (m *AudioCacheManager) CacheInput(ctx context.Context, data []byte, mimeType string) {
-	if mimeType != "" && !strings.HasPrefix(mimeType, "audio/") {
+	if !strings.HasPrefix(mimeType, "audio/") {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.inputCache) == 0 {
 		m.inputStartTime = platform.Now(ctx)
-		if mimeType != "" {
-			m.inputMimeType = mimeType
-		}
+		m.inputMimeType = mimeType
 	}
 	m.inputCache = append(m.inputCache, data)
 }
 
-// CacheOutput caches outgoing model audio data.
+// CacheOutput caches outgoing model audio data. It caches a chunk only when the
+// chunk carries an explicit "audio/..." MIME type. An unknown (empty) MIME type
+// is not assumed to be audio, so unlabelled model blobs are never spliced into
+// the saved model audio.
 func (m *AudioCacheManager) CacheOutput(ctx context.Context, data []byte, mimeType string) {
-	if mimeType != "" && !strings.HasPrefix(mimeType, "audio/") {
+	if !strings.HasPrefix(mimeType, "audio/") {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.outputCache) == 0 {
 		m.outputStartTime = platform.Now(ctx)
-		if mimeType != "" {
-			m.outputMimeType = mimeType
-		}
+		m.outputMimeType = mimeType
 	}
 	m.outputCache = append(m.outputCache, data)
 }

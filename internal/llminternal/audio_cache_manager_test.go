@@ -17,6 +17,7 @@ package llminternal
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,10 @@ type audioMockAgent struct {
 }
 
 func (m *audioMockAgent) Name() string { return m.name }
+
+// pngSignature is the 8-byte PNG file signature, standing in for a video frame
+// that a caller streams without a MIME type.
+var pngSignature = []byte("\x89PNG\r\n\x1a\n")
 
 func TestAudioCacheManager(t *testing.T) {
 	type chunk struct {
@@ -190,16 +195,92 @@ func TestAudioCacheManager(t *testing.T) {
 			},
 		},
 		{
-			name: "MimeTypeFallback",
+			name: "EmptyMimeTypeInputDropped",
 			inputs: []chunk{
 				{[]byte("input1"), ""},
 			},
 			flushUser:           true,
 			flushModel:          false,
+			expectedEventsCount: 0,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if mockArt.savedPart != nil {
+					t.Errorf("Expected nothing saved, got %v", mockArt.savedPart)
+				}
+			},
+		},
+		{
+			name: "EmptyMimeTypeOutputDropped",
+			outputs: []chunk{
+				{[]byte("output1"), ""},
+			},
+			flushUser:           false,
+			flushModel:          true,
+			expectedEventsCount: 0,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if mockArt.savedPart != nil {
+					t.Errorf("Expected nothing saved, got %v", mockArt.savedPart)
+				}
+			},
+		},
+		{
+			name: "EmptyMimeTypeNotSplicedIntoAudio",
+			inputs: []chunk{
+				{pngSignature, ""},
+				{[]byte("audio_input"), "audio/pcm"},
+			},
+			flushUser:           true,
+			flushModel:          false,
 			expectedEventsCount: 1,
 			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if mockArt.savedPart == nil {
+					t.Fatal("Expected savedPart, got nil")
+				}
+				if !bytes.Equal(mockArt.savedPart.InlineData.Data, []byte("audio_input")) {
+					t.Errorf("Expected only 'audio_input' to be saved, got %q", mockArt.savedPart.InlineData.Data)
+				}
 				if mockArt.savedPart.InlineData.MIMEType != "audio/pcm" {
-					t.Errorf("Expected fallback MIMEType audio/pcm, got %s", mockArt.savedPart.InlineData.MIMEType)
+					t.Errorf("Expected MIMEType audio/pcm, got %s", mockArt.savedPart.InlineData.MIMEType)
+				}
+			},
+		},
+		{
+			name: "EmptyMimeTypeOutputNotSplicedIntoAudio",
+			outputs: []chunk{
+				{pngSignature, ""},
+				{[]byte("audio_output"), "audio/pcm"},
+			},
+			flushUser:           false,
+			flushModel:          true,
+			expectedEventsCount: 1,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if mockArt.savedPart == nil {
+					t.Fatal("Expected savedPart, got nil")
+				}
+				if !bytes.Equal(mockArt.savedPart.InlineData.Data, []byte("audio_output")) {
+					t.Errorf("Expected only 'audio_output' to be saved, got %q", mockArt.savedPart.InlineData.Data)
+				}
+				if mockArt.savedPart.InlineData.MIMEType != "audio/pcm" {
+					t.Errorf("Expected MIMEType audio/pcm, got %s", mockArt.savedPart.InlineData.MIMEType)
+				}
+			},
+		},
+		{
+			name: "ParameterisedAudioMimeTypeCached",
+			inputs: []chunk{
+				{[]byte("input1"), "audio/pcm;rate=16000"},
+			},
+			flushUser:           true,
+			flushModel:          false,
+			expectedEventsCount: 1,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if mockArt.savedPart == nil {
+					t.Fatal("Expected savedPart, got nil")
+				}
+				if mockArt.savedPart.InlineData.MIMEType != "audio/pcm;rate=16000" {
+					t.Errorf("Expected MIMEType audio/pcm;rate=16000, got %s", mockArt.savedPart.InlineData.MIMEType)
+				}
+				if !strings.HasSuffix(mockArt.savedName, ".pcm") {
+					t.Errorf("Expected filename ending in .pcm, got %s", mockArt.savedName)
 				}
 			},
 		},
