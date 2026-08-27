@@ -84,7 +84,7 @@ func WithStateDelta(delta map[string]any) RunOption {
 // WithYieldUserMessage makes Run yield the user message event (after it is
 // appended to the session) before any agent/node events. Mirrors
 // adk-python's yield_user_message. Currently honored by the node path.
-// RunLive returns an error for it, because a live session has no user message.
+// RunLive ignores it: a live session has no user message to yield.
 func WithYieldUserMessage() RunOption {
 	return func(o *runOptions) {
 		o.yieldUserMessage = true
@@ -427,11 +427,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	for _, opt := range opts {
 		opt(&options)
 	}
-	// Reject before any session I/O, so a rejected call has no side effect.
-	if options.yieldUserMessage {
-		return nil, nil, fmt.Errorf("WithYieldUserMessage is not supported by RunLive: a live session has no user message to yield")
-	}
-
 	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 	if err != nil {
 		return nil, nil, err

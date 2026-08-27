@@ -465,38 +465,6 @@ func TestRunner_RunLive_StateDeltaVisibleToBeforeRunCallback(t *testing.T) {
 	}
 }
 
-func TestRunner_RunLive_YieldUserMessageRejected(t *testing.T) {
-	ctx := t.Context()
-	sessionID := "testSessionYieldUserMessage"
-	sessionService := session.InMemoryService()
-
-	var runLiveCalled bool
-	r := newLiveTestRunner(t, sessionService, sessionID, func(ictx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-		runLiveCalled = true
-		return emitOneEvent(ictx)
-	})
-
-	sess, events, err := r.RunLive(ctx, liveTestUser, sessionID, agent.LiveRunConfig{}, WithYieldUserMessage())
-	if err == nil {
-		t.Fatal("RunLive succeeded, want an error for WithYieldUserMessage")
-	}
-	if !strings.Contains(err.Error(), "WithYieldUserMessage") {
-		t.Errorf("error %q does not name WithYieldUserMessage", err)
-	}
-	if sess != nil {
-		t.Errorf("RunLive returned session %v, want nil", sess)
-	}
-	if events != nil {
-		t.Error("RunLive returned an event iterator, want nil")
-	}
-	if runLiveCalled {
-		t.Error("the agent's RunLive ran, want no side effect from a rejected call")
-	}
-	if n := storedEvents(t, sessionService, sessionID).Len(); n != 0 {
-		t.Errorf("session holds %d events, want 0", n)
-	}
-}
-
 func TestRunner_RunLive_WithoutStateDeltaAppendsNoExtraEvent(t *testing.T) {
 	tests := []struct {
 		name string
@@ -505,6 +473,8 @@ func TestRunner_RunLive_WithoutStateDeltaAppendsNoExtraEvent(t *testing.T) {
 		{name: "no options"},
 		{name: "nil delta", opts: []RunOption{WithStateDelta(nil)}},
 		{name: "empty delta", opts: []RunOption{WithStateDelta(map[string]any{})}},
+		// RunLive has no user message, so it ignores this option as documented.
+		{name: "yield user message", opts: []RunOption{WithYieldUserMessage()}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
