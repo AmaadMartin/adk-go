@@ -20,6 +20,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -427,10 +428,120 @@ recordings:
 	})
 }
 
+// TestReplayPlugin_StreamingModeSelectsRecordingsFile verifies that the plugin
+// reads the recordings file named by "streaming_mode".
+func TestReplayPlugin_StreamingModeSelectsRecordingsFile(t *testing.T) {
+	recordingsYAML := func(responseText string) string {
+		return fmt.Sprintf(`
+recordings:
+  - user_message_index: 0
+    agent_name: "test_agent"
+    llm_recording:
+      llm_request:
+        model: "gemini-2.0-flash"
+        contents:
+          - role: "user"
+            parts:
+              - text: "Hello"
+      llm_responses:
+        - content:
+            role: "model"
+            parts:
+              - text: %q
+`, responseText)
+	}
+
+	tests := []struct {
+		name string
+		// streamingMode is seeded under "streaming_mode" only when seedMode is true.
+		streamingMode   any
+		seedMode        bool
+		omitSSEFile     bool
+		wantText        string
+		wantErrContains string
+	}{
+		{name: "SSE_ReadsSSEFile", streamingMode: "sse", seedMode: true, wantText: "streaming response"},
+		{name: "None_ReadsNonStreamingFile", streamingMode: "none", seedMode: true, wantText: "non-streaming response"},
+		{name: "Absent_ReadsNonStreamingFile", wantText: "non-streaming response"},
+		{name: "Nil_ReadsNonStreamingFile", streamingMode: nil, seedMode: true, wantText: "non-streaming response"},
+		{name: "Unsupported_ReturnsError", streamingMode: "bidi", seedMode: true, wantErrContains: `unsupported streaming mode: "bidi"`},
+		{name: "EmptyString_ReturnsError", streamingMode: "", seedMode: true, wantErrContains: `unsupported streaming mode: ""`},
+		{name: "NonString_ReturnsError", streamingMode: 42, seedMode: true, wantErrContains: "'streaming_mode' is not a string"},
+		{name: "SSEFileMissing_ReturnsError", streamingMode: "sse", seedMode: true, omitSSEFile: true, wantErrContains: "generated-recordings-sse.yaml"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := replayplugin.MustNew("/")
+			tempDir := t.TempDir()
+
+			// Both fixtures hold the same request and a different response text, so
+			// the replayed text names the file the plugin opened. With only one
+			// fixture on disk a plugin that ignores the mode would still pass.
+			createRecordingsFile(t, tempDir, recordingsYAML("non-streaming response"))
+			if !tt.omitSSEFile {
+				createRecordingsFileNamed(t, tempDir, "generated-recordings-sse.yaml", recordingsYAML("streaming response"))
+			}
+
+			config := map[string]any{"dir": tempDir, "user_message_index": 0}
+			if tt.seedMode {
+				config["streaming_mode"] = tt.streamingMode
+			}
+			mockSession := &MockSession{state: &MockState{data: make(map[string]any)}}
+			if err := mockSession.State().Set("_adk_replay_config", config); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			invContext := &MockInvocationContext{session: mockSession, invocationID: "test-invocation"}
+			_, err := p.BeforeRunCallback()(invContext)
+
+			if tt.wantErrContains != "" {
+				if err == nil {
+					t.Fatalf("BeforeRunCallback() error = nil, want an error containing %q", tt.wantErrContains)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Fatalf("BeforeRunCallback() error = %q, want it to contain %q", err, tt.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			cbContext := &MockCallbackContext{
+				state:        mockSession.State(),
+				invocationID: "test-invocation",
+				agentName:    "test_agent",
+			}
+			request := &model.LLMRequest{
+				Model: "gemini-2.0-flash",
+				Contents: []*genai.Content{
+					{Role: "user", Parts: []*genai.Part{{Text: "Hello"}}},
+				},
+			}
+			result, err := p.BeforeModelCallback()(cbContext, request)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result == nil || result.Content == nil {
+				t.Fatal("expected a recorded response with content")
+			}
+			if got := result.Content.Parts[0].Text; got != tt.wantText {
+				t.Errorf("replayed response = %q, want %q", got, tt.wantText)
+			}
+		})
+	}
+}
+
 // --- Helpers & Mocks ---
 
 func createRecordingsFile(t *testing.T, dir, content string) {
-	path := filepath.Join(dir, "generated-recordings.yaml")
+	createRecordingsFileNamed(t, dir, "generated-recordings.yaml", content)
+}
+
+func createRecordingsFileNamed(t *testing.T, dir, name, content string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
 	err := os.WriteFile(path, []byte(content), 0o644)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

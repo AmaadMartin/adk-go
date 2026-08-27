@@ -27,8 +27,11 @@ package replayplugin
 //
 // Replay configuration is expected in the session state under the key "_adk_replay_config",
 // containing:
-//   - "dir": Path to the directory containing "generated-recordings.yaml".
+//   - "dir": Path to the directory containing the recordings file.
 //   - "user_message_index": The index of the user message to replay.
+//   - "streaming_mode": Optional. "sse" reads "generated-recordings-sse.yaml".
+//     "none", or an absent key, reads "generated-recordings.yaml". Any other
+//     value is an error.
 
 import (
 	"encoding/json"
@@ -296,8 +299,31 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 		return nil, fmt.Errorf("replay config error: 'user_message_index' is missing or not a number")
 	}
 
+	// Safely extract 'streaming_mode'. An absent or nil key means non-streaming,
+	// which matches the default the record plugin applies when it writes.
+	streamingMode := "none"
+	switch v := config["streaming_mode"].(type) {
+	case nil:
+	case string:
+		streamingMode = v
+	default:
+		return nil, fmt.Errorf("replay config error: 'streaming_mode' is not a string")
+	}
+
 	// 3. Load Recordings File
-	recordingsPath := filepath.Join(requestedAbsPath, "generated-recordings.yaml")
+	// The record plugin writes the SSE fixture under a separate name, so the
+	// replay side must select the same name for the mode the client asked for.
+	var recordingsFile string
+	switch streamingMode {
+	case "sse":
+		recordingsFile = "generated-recordings-sse.yaml"
+	case "none":
+		recordingsFile = "generated-recordings.yaml"
+	default:
+		return nil, fmt.Errorf("replay config error: unsupported streaming mode: %q", streamingMode)
+	}
+
+	recordingsPath := filepath.Join(requestedAbsPath, recordingsFile)
 
 	// Check if file exists
 	if _, err := os.Stat(recordingsPath); os.IsNotExist(err) {
