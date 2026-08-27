@@ -33,6 +33,10 @@ Three more fields cover the cases those two cannot express:
 All three are optional, and their zero values reproduce the behaviour of a
 request that does not set them.
 
+`StateDelta` is a `*map[string]any`, so write it as
+`&map[string]any{"key": value}`. The pointer keeps `LiveRequest` comparable: a
+map field would take `==` away from every caller.
+
 ## Get started
 
 This program opens a live session, streams audio, flushes it, and records a
@@ -111,7 +115,7 @@ func main() {
 
 		// Record a change the user made in the interface.
 		err = sess.Send(agent.LiveRequest{
-			StateDelta: map[string]any{"ui_locale": "fr-FR"},
+			StateDelta: &map[string]any{"ui_locale": "fr-FR"},
 		})
 		if err != nil {
 			log.Print(err)

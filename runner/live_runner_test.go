@@ -182,7 +182,7 @@ func TestRunnerLiveSessionSendPersistence(t *testing.T) {
 		},
 		{
 			name:       "state delta alone appends one content-less event",
-			req:        agent.LiveRequest{StateDelta: map[string]any{"ui_locale": "fr-FR"}},
+			req:        agent.LiveRequest{StateDelta: &map[string]any{"ui_locale": "fr-FR"}},
 			wantEvents: 1,
 			wantDelta:  map[string]any{"ui_locale": "fr-FR"},
 			wantState:  map[string]any{"ui_locale": "fr-FR"},
@@ -191,7 +191,7 @@ func TestRunnerLiveSessionSendPersistence(t *testing.T) {
 			name: "content and state delta share one event",
 			req: agent.LiveRequest{
 				Content:    userText,
-				StateDelta: map[string]any{"ui_locale": "fr-FR"},
+				StateDelta: &map[string]any{"ui_locale": "fr-FR"},
 			},
 			wantContent: userText,
 			wantEvents:  1,
@@ -203,7 +203,7 @@ func TestRunnerLiveSessionSendPersistence(t *testing.T) {
 			req: agent.LiveRequest{
 				Content:    userText,
 				Partial:    true,
-				StateDelta: map[string]any{"ui_locale": "fr-FR"},
+				StateDelta: &map[string]any{"ui_locale": "fr-FR"},
 			},
 			wantEvents: 1,
 			wantDelta:  map[string]any{"ui_locale": "fr-FR"},
@@ -213,7 +213,7 @@ func TestRunnerLiveSessionSendPersistence(t *testing.T) {
 			name: "function response with a state delta keeps the content out of history",
 			req: agent.LiveRequest{
 				Content:    functionResponse,
-				StateDelta: map[string]any{"ui_locale": "fr-FR"},
+				StateDelta: &map[string]any{"ui_locale": "fr-FR"},
 			},
 			wantEvents: 1,
 			wantDelta:  map[string]any{"ui_locale": "fr-FR"},
@@ -295,7 +295,7 @@ func TestRunnerLiveSessionSendReturnsAgentError(t *testing.T) {
 
 	err := f.sess.Send(agent.LiveRequest{
 		Content:    genai.NewContentFromText("hello", genai.RoleUser),
-		StateDelta: map[string]any{"ui_locale": "fr-FR"},
+		StateDelta: &map[string]any{"ui_locale": "fr-FR"},
 	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Send error = %v, want %v", err, wantErr)
@@ -320,7 +320,7 @@ func TestRunnerLiveSessionSendWrapsAppendFailure(t *testing.T) {
 		},
 		{
 			name:       "standalone state delta event",
-			req:        agent.LiveRequest{StateDelta: map[string]any{"ui_locale": "fr-FR"}},
+			req:        agent.LiveRequest{StateDelta: &map[string]any{"ui_locale": "fr-FR"}},
 			wantPrefix: "failed to add state delta event to session",
 		},
 	}

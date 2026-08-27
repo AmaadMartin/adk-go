@@ -26,7 +26,9 @@ type LiveSession interface {
 
 // LiveRequest represents an incoming client event for a live session.
 type LiveRequest struct {
-	// RealtimeInput can be *genai.Blob, *genai.ActivityStart, or *genai.ActivityEnd.
+	// RealtimeInput can be *genai.Blob, *genai.ActivityStart, *genai.ActivityEnd,
+	// or a *genai.LiveRealtimeInput carrying a frame the other three cannot
+	// express.
 	RealtimeInput any
 
 	// Content represents standard text or multimodal content from the user.
@@ -45,11 +47,14 @@ type LiveRequest struct {
 	// recorded as a user content event in session history.
 	Partial bool
 
-	// StateDelta holds session state changes to apply alongside this request.
-	// It is applied whether or not the request carries content, so a state
-	// change still lands for a content-less, partial, or function-response
-	// request.
-	StateDelta map[string]any
+	// StateDelta holds session state changes to apply alongside this request,
+	// for example &map[string]any{"ui_locale": "fr-FR"}. It is applied whether
+	// or not the request carries content, so a state change still lands for a
+	// content-less, partial, or function-response request.
+	//
+	// It is a pointer to a map rather than a map so that LiveRequest stays
+	// comparable, which a map field would take away from every caller.
+	StateDelta *map[string]any
 }
 
 // LiveRunConfig contains options for configuring a live session.

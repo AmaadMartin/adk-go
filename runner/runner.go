@@ -389,6 +389,11 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 		return err
 	}
 
+	var stateDelta map[string]any
+	if req.StateDelta != nil {
+		stateDelta = *req.StateDelta
+	}
+
 	// A partial turn is an intermediate update, so it stays out of history.
 	hasContent := req.Content != nil && len(req.Content.Parts) > 0
 	if hasContent && !req.Partial && !hasFunctionResponse(req.Content) {
@@ -402,7 +407,7 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 		// copy into it rather than replacing it, because an empty map and a nil
 		// map mean different things on the wire, and the caller keeps ownership
 		// of the map it passed.
-		maps.Copy(event.Actions.StateDelta, req.StateDelta)
+		maps.Copy(event.Actions.StateDelta, stateDelta)
 		if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
 			return fmt.Errorf("failed to add user event to session: %w", err)
 		}
@@ -411,12 +416,12 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 
 	// No user content event to carry the state changes, so apply them on an
 	// event of their own.
-	if len(req.StateDelta) == 0 {
+	if len(stateDelta) == 0 {
 		return nil
 	}
 	event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
 	event.Author = "user"
-	maps.Copy(event.Actions.StateDelta, req.StateDelta)
+	maps.Copy(event.Actions.StateDelta, stateDelta)
 	if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
 		return fmt.Errorf("failed to add state delta event to session: %w", err)
 	}
