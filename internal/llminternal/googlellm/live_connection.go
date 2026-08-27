@@ -15,6 +15,7 @@
 package googlellm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -158,41 +159,49 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 	return nil
 }
 
-// SendRealtime sends real-time input (audio/video).
+// pngSignature is the 8-byte header that every PNG stream starts with.
+var pngSignature = []byte("\x89PNG\r\n\x1a\n")
+
+// realtimeBlob returns a copy of b to send, carrying a sniffed MIME type when
+// b has none. The copy is unconditional so that b stays the caller's alone: a
+// caller may reuse one Blob value across sends, and a type written back would
+// stick to every later send through that value.
+func realtimeBlob(b *genai.Blob) *genai.Blob {
+	sent := *b
+	if sent.MIMEType == "" {
+		sent.MIMEType = "audio/pcm"
+		if bytes.HasPrefix(sent.Data, pngSignature) {
+			sent.MIMEType = "image/png"
+		}
+	}
+	return &sent
+}
+
+// SendRealtime sends real-time input (audio/video). It does not modify the
+// caller's value.
 func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
 	switch v := input.(type) {
 	case *genai.Blob:
-		if v.MIMEType == "" {
-			// Detect PNG by signature: \x89PNG\r\n\x1a\n
-			isPNG := len(v.Data) >= 8 &&
-				v.Data[0] == 0x89 && v.Data[1] == 0x50 && v.Data[2] == 0x4E && v.Data[3] == 0x47 &&
-				v.Data[4] == 0x0D && v.Data[5] == 0x0A && v.Data[6] == 0x1A && v.Data[7] == 0x0A
-
-			if isPNG {
-				v.MIMEType = "image/png"
-			} else {
-				v.MIMEType = "audio/pcm"
-			}
-		}
+		blob := realtimeBlob(v)
 
 		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
 		isGeminiAPI := c.backend == genai.BackendGeminiAPI
 		if isGemini31 && isGeminiAPI {
-			if strings.HasPrefix(v.MIMEType, "image/") {
+			if strings.HasPrefix(blob.MIMEType, "image/") {
 				return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
-					Video: v,
+					Video: blob,
 				})
 			}
 			return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
-				Audio: v,
+				Audio: blob,
 			})
 		}
 
 		return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
-			Media: v,
+			Media: blob,
 		})
 	case *genai.ActivityStart:
 		log.Printf("sending activity start\n")

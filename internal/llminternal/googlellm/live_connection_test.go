@@ -15,23 +15,40 @@
 package googlellm
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 )
+
+// framesBuffer caps how many client frames the fake keeps for inspection.
+// Sends into the channel are non-blocking, so a test that writes more frames
+// than this drops the surplus rather than wedging the fake's read loop.
+const framesBuffer = 64
 
 // newFakeLiveConnection dials a LiveConnection at a Gemini Live wire-protocol
 // fake: it upgrades the websocket, consumes the client's setup frame, replies
 // {"setupComplete":{}}, then drains frames until the read fails. The drain is
 // required. Without a reader the socket buffer fills, the client's writes
 // block, and a test hangs instead of failing.
-func newFakeLiveConnection(t *testing.T) *LiveConnection {
+//
+// The returned channel carries the frames the client sent after setup.
+//
+// backend is the value the LiveConnection routes on. The transport always
+// speaks the Gemini API wire format, because that is what the fake serves, so
+// a non-Gemini-API backend here selects the routing branch without changing
+// the frame layout the tests decode.
+func newFakeLiveConnection(t *testing.T, modelName string, backend genai.Backend) (*LiveConnection, <-chan []byte) {
 	t.Helper()
+	frames := make(chan []byte, framesBuffer)
 	var upgrader websocket.Upgrader
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -49,8 +66,13 @@ func newFakeLiveConnection(t *testing.T) *LiveConnection {
 			return
 		}
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			_, frame, err := conn.ReadMessage()
+			if err != nil {
 				return
+			}
+			select {
+			case frames <- frame:
+			default:
 			}
 		}
 	}))
@@ -64,13 +86,47 @@ func newFakeLiveConnection(t *testing.T) *LiveConnection {
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
-	session, err := client.Live.Connect(t.Context(), "test-live-model", &genai.LiveConnectConfig{})
+	session, err := client.Live.Connect(t.Context(), modelName, &genai.LiveConnectConfig{})
 	if err != nil {
 		t.Fatalf("Live.Connect failed: %v", err)
 	}
-	conn := NewLiveConnection(session, "test-live-model", genai.BackendGeminiAPI)
+	conn := NewLiveConnection(session, modelName, backend)
 	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+	return conn, frames
+}
+
+// wireBlob is a genai.Blob as the Gemini Live wire format carries it. Data is
+// base64 in the JSON and encoding/json decodes it back into the byte slice.
+type wireBlob struct {
+	Data     []byte `json:"data"`
+	MIMEType string `json:"mimeType"`
+}
+
+// realtimeInput holds the three realtime channels SendRealtime routes a blob
+// to. Exactly one is set on any frame the blob case sends.
+type realtimeInput struct {
+	MediaChunks []*wireBlob `json:"mediaChunks,omitempty"`
+	Audio       *wireBlob   `json:"audio,omitempty"`
+	Video       *wireBlob   `json:"video,omitempty"`
+}
+
+// nextRealtimeInput returns the realtime input of the next frame the client
+// sent. It fails the test when no frame arrives before the deadline.
+func nextRealtimeInput(t *testing.T, frames <-chan []byte) realtimeInput {
+	t.Helper()
+	select {
+	case frame := <-frames:
+		var decoded struct {
+			RealtimeInput realtimeInput `json:"realtimeInput"`
+		}
+		if err := json.Unmarshal(frame, &decoded); err != nil {
+			t.Fatalf("decoding frame %q failed: %v", frame, err)
+		}
+		return decoded.RealtimeInput
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for a realtime frame")
+		return realtimeInput{}
+	}
 }
 
 // TestLiveConnectionConcurrentSends drives every write path of one
@@ -87,7 +143,7 @@ func TestLiveConnectionConcurrentSends(t *testing.T) {
 		senders    = 8
 		iterations = 50
 	)
-	conn := newFakeLiveConnection(t)
+	conn, _ := newFakeLiveConnection(t, "test-live-model", genai.BackendGeminiAPI)
 	ctx := t.Context()
 
 	// One send per guarded method, chosen by the sender's index so all three
@@ -107,9 +163,6 @@ func TestLiveConnectionConcurrentSends(t *testing.T) {
 			})
 		},
 		func() error {
-			// A fresh Blob per send: SendRealtime fills in an empty MIMEType,
-			// so a shared value would be mutated in place and the test would
-			// report its own race instead of the one under test.
 			return conn.SendRealtime(ctx, &genai.Blob{
 				Data:     []byte{0x00, 0x01, 0x02, 0x03},
 				MIMEType: "audio/pcm",
@@ -141,5 +194,220 @@ func TestLiveConnectionConcurrentSends(t *testing.T) {
 
 	for err := range errCh {
 		t.Errorf("concurrent send failed: %v", err)
+	}
+}
+
+// TestRealtimeBlob pins the sniffing rules and the read-only contract on the
+// caller's value.
+func TestRealtimeBlob(t *testing.T) {
+	signature := []byte("\x89PNG\r\n\x1a\n")
+	pcm := []byte{0x00, 0x01, 0x02, 0x03}
+
+	tests := []struct {
+		name string
+		in   *genai.Blob
+		want genai.Blob
+	}{
+		{
+			name: "png signature with a payload",
+			in:   &genai.Blob{Data: append(slices.Clone(signature), 'p', 'a', 'y')},
+			want: genai.Blob{Data: append(slices.Clone(signature), 'p', 'a', 'y'), MIMEType: "image/png"},
+		},
+		{
+			name: "exactly the png signature",
+			in:   &genai.Blob{Data: slices.Clone(signature)},
+			want: genai.Blob{Data: slices.Clone(signature), MIMEType: "image/png"},
+		},
+		{
+			name: "bytes that are not png",
+			in:   &genai.Blob{Data: pcm},
+			want: genai.Blob{Data: pcm, MIMEType: "audio/pcm"},
+		},
+		{
+			name: "a truncated png signature",
+			in:   &genai.Blob{Data: signature[:7]},
+			want: genai.Blob{Data: signature[:7], MIMEType: "audio/pcm"},
+		},
+		{
+			name: "the last signature byte differs",
+			in:   &genai.Blob{Data: append(slices.Clone(signature[:7]), 0x0B)},
+			want: genai.Blob{Data: append(slices.Clone(signature[:7]), 0x0B), MIMEType: "audio/pcm"},
+		},
+		{
+			name: "no data at all",
+			in:   &genai.Blob{},
+			want: genai.Blob{MIMEType: "audio/pcm"},
+		},
+		{
+			name: "the copy keeps every other field",
+			in:   &genai.Blob{Data: slices.Clone(signature), DisplayName: "frame.png"},
+			want: genai.Blob{Data: slices.Clone(signature), DisplayName: "frame.png", MIMEType: "image/png"},
+		},
+		{
+			name: "an explicit mime type is passed through",
+			in:   &genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=16000"},
+			want: genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=16000"},
+		},
+		{
+			name: "an explicit mime type wins over the png signature",
+			in:   &genai.Blob{Data: slices.Clone(signature), MIMEType: "image/jpeg"},
+			want: genai.Blob{Data: slices.Clone(signature), MIMEType: "image/jpeg"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := *tc.in
+
+			got := realtimeBlob(tc.in)
+
+			if got == tc.in {
+				t.Error("realtimeBlob() returned the caller's pointer, want a copy")
+			}
+			if diff := cmp.Diff(tc.want, *got); diff != "" {
+				t.Errorf("realtimeBlob() returned an unexpected blob (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(before, *tc.in); diff != "" {
+				t.Errorf("realtimeBlob() modified the caller's blob (-before +after):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestSendRealtimeDoesNotMutateCallerBlob reuses one Blob value across two
+// sends, the way a caller that owns a single capture buffer does. Writing the
+// sniffed type back into that value labels the second send with the first
+// send's type.
+func TestSendRealtimeDoesNotMutateCallerBlob(t *testing.T) {
+	conn, frames := newFakeLiveConnection(t, "gemini-3.1-flash-live", genai.BackendGeminiAPI)
+	ctx := t.Context()
+
+	png := []byte("\x89PNG\r\n\x1a\nframe")
+	pcm := []byte{0x00, 0x01, 0x02, 0x03}
+
+	blob := &genai.Blob{Data: png}
+	if err := conn.SendRealtime(ctx, blob); err != nil {
+		t.Fatalf("SendRealtime(png) failed: %v", err)
+	}
+	if blob.MIMEType != "" {
+		t.Errorf("after the first send the caller's MIMEType = %q, want it still empty", blob.MIMEType)
+	}
+	wantFirst := realtimeInput{Video: &wireBlob{Data: png, MIMEType: "image/png"}}
+	if diff := cmp.Diff(wantFirst, nextRealtimeInput(t, frames)); diff != "" {
+		t.Errorf("first frame is unexpected (-want +got):\n%s", diff)
+	}
+
+	blob.Data = pcm
+	if err := conn.SendRealtime(ctx, blob); err != nil {
+		t.Fatalf("SendRealtime(pcm) failed: %v", err)
+	}
+	if blob.MIMEType != "" {
+		t.Errorf("after the second send the caller's MIMEType = %q, want it still empty", blob.MIMEType)
+	}
+	wantSecond := realtimeInput{Audio: &wireBlob{Data: pcm, MIMEType: "audio/pcm"}}
+	if diff := cmp.Diff(wantSecond, nextRealtimeInput(t, frames)); diff != "" {
+		t.Errorf("second frame is unexpected (-want +got):\n%s", diff)
+	}
+}
+
+// TestSendRealtimeRoutesBlob pins the realtime channel each combination of
+// model, backend and MIME type selects, so moving the sniff off the caller's
+// value cannot change what goes on the wire.
+func TestSendRealtimeRoutesBlob(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\nframe")
+	pcm := []byte{0x00, 0x01, 0x02, 0x03}
+
+	tests := []struct {
+		name      string
+		modelName string
+		backend   genai.Backend
+		blob      *genai.Blob
+		want      realtimeInput
+	}{
+		{
+			name:      "gemini 3.1 sends a sniffed image on the video channel",
+			modelName: "gemini-3.1-flash-live",
+			backend:   genai.BackendGeminiAPI,
+			blob:      &genai.Blob{Data: png},
+			want:      realtimeInput{Video: &wireBlob{Data: png, MIMEType: "image/png"}},
+		},
+		{
+			name:      "gemini 3.1 sends sniffed audio on the audio channel",
+			modelName: "gemini-3.1-flash-live",
+			backend:   genai.BackendGeminiAPI,
+			blob:      &genai.Blob{Data: pcm},
+			want:      realtimeInput{Audio: &wireBlob{Data: pcm, MIMEType: "audio/pcm"}},
+		},
+		{
+			name:      "gemini 3.1 keeps an explicit mime type",
+			modelName: "gemini-3.1-flash-live",
+			backend:   genai.BackendGeminiAPI,
+			blob:      &genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=16000"},
+			want:      realtimeInput{Audio: &wireBlob{Data: pcm, MIMEType: "audio/pcm;rate=16000"}},
+		},
+		{
+			name:      "an older model sends media chunks",
+			modelName: "gemini-2.0-flash-live-001",
+			backend:   genai.BackendGeminiAPI,
+			blob:      &genai.Blob{Data: pcm},
+			want:      realtimeInput{MediaChunks: []*wireBlob{{Data: pcm, MIMEType: "audio/pcm"}}},
+		},
+		{
+			name:      "another backend sends media chunks",
+			modelName: "gemini-3.1-flash-live",
+			backend:   genai.BackendVertexAI,
+			blob:      &genai.Blob{Data: png},
+			want:      realtimeInput{MediaChunks: []*wireBlob{{Data: png, MIMEType: "image/png"}}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, frames := newFakeLiveConnection(t, tc.modelName, tc.backend)
+			before := *tc.blob
+
+			if err := conn.SendRealtime(t.Context(), tc.blob); err != nil {
+				t.Fatalf("SendRealtime failed: %v", err)
+			}
+
+			if diff := cmp.Diff(tc.want, nextRealtimeInput(t, frames)); diff != "" {
+				t.Errorf("frame is unexpected (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(before, *tc.blob); diff != "" {
+				t.Errorf("SendRealtime modified the caller's blob (-before +after):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestSendRealtimeNonBlobInput covers the activity signals and the error the
+// default arm returns for an input type the method does not accept.
+func TestSendRealtimeNonBlobInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   any
+		wantErr string
+	}{
+		{name: "activity start", input: &genai.ActivityStart{}},
+		{name: "activity end", input: &genai.ActivityEnd{}},
+		{name: "an unsupported type", input: "text", wantErr: "unsupported real-time input type: string"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, _ := newFakeLiveConnection(t, "test-live-model", genai.BackendGeminiAPI)
+
+			err := conn.SendRealtime(t.Context(), tc.input)
+
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("SendRealtime() = %v, want no error", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Errorf("SendRealtime() = %v, want %q", err, tc.wantErr)
+			}
+		})
 	}
 }
