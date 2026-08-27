@@ -25,10 +25,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/genai"
 	"rsc.io/omap"
 	"rsc.io/ordered"
+
+	"google.golang.org/adk/v2/platform"
 )
 
 // inMemoryService is an in-memory implementation of the Service.
@@ -36,7 +39,15 @@ import (
 type inMemoryService struct {
 	mu sync.RWMutex
 	// ordered(appName, userID, sessionID) -> session
-	artifacts omap.Map[string, *genai.Part]
+	artifacts omap.Map[string, *artifactEntry]
+}
+
+// artifactEntry is a stored artifact payload together with the version
+// metadata recorded when the artifact was saved.
+type artifactEntry struct {
+	part         *genai.Part
+	canonicalURI string
+	createTime   time.Time
 }
 
 // InMemoryService returns a new in-memory artifact service.
@@ -47,6 +58,17 @@ func InMemoryService() Service {
 // fileHasUserNamespace checks if a filename indicates a user scoped artifact.
 func fileHasUserNamespace(filename string) bool {
 	return strings.HasPrefix(filename, "user:")
+}
+
+// memoryCanonicalURI returns the memory:// URI identifying a stored artifact
+// version. User scoped artifacts are not bound to a session, so their URI
+// omits the session segment. The file name is embedded verbatim, including its
+// "user:" prefix, to match adk-python.
+func memoryCanonicalURI(appName, userID, sessionID, fileName string, version int64) string {
+	if fileHasUserNamespace(fileName) {
+		return fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", appName, userID, fileName, version)
+	}
+	return fmt.Sprintf("memory://apps/%s/users/%s/sessions/%s/artifacts/%s/versions/%d", appName, userID, sessionID, fileName, version)
 }
 
 // userScopedArtifactKey defines the string for the part of the path used by user scope files
@@ -80,8 +102,8 @@ func (ak *artifactKey) Decode(key string) error {
 // scan returns an iterator over all key-value pairs
 // in the range begin ≤ key ≤ end.
 // TODO: add a concurrent tests.
-func (s *inMemoryService) scan(lo, hi string) iter.Seq2[artifactKey, *genai.Part] {
-	return func(yield func(key artifactKey, val *genai.Part) bool) {
+func (s *inMemoryService) scan(lo, hi string) iter.Seq2[artifactKey, *artifactEntry] {
+	return func(yield func(key artifactKey, val *artifactEntry) bool) {
 		for k, val := range s.artifacts.Scan(lo, hi) {
 			var key artifactKey
 			if err := key.Decode(k); err != nil {
@@ -95,7 +117,7 @@ func (s *inMemoryService) scan(lo, hi string) iter.Seq2[artifactKey, *genai.Part
 	}
 }
 
-func (s *inMemoryService) find(appName, userID, sessionID, fileName string) (int64, *genai.Part, bool) {
+func (s *inMemoryService) find(appName, userID, sessionID, fileName string) (int64, *artifactEntry, bool) {
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 0}.Encode()
 	for key, val := range s.scan(lo, hi) {
@@ -105,7 +127,7 @@ func (s *inMemoryService) find(appName, userID, sessionID, fileName string) (int
 	return 0, nil, false
 }
 
-func (s *inMemoryService) get(appName, userID, sessionID, fileName string, version int64) (*genai.Part, bool) {
+func (s *inMemoryService) get(appName, userID, sessionID, fileName string, version int64) (*artifactEntry, bool) {
 	key := artifactKey{
 		AppName:   appName,
 		UserID:    userID,
@@ -116,7 +138,7 @@ func (s *inMemoryService) get(appName, userID, sessionID, fileName string, versi
 	return s.artifacts.Get(key)
 }
 
-func (s *inMemoryService) set(appName, userID, sessionID, fileName string, version int64, artifact *genai.Part) {
+func (s *inMemoryService) set(appName, userID, sessionID, fileName string, version int64, entry *artifactEntry) {
 	key := artifactKey{
 		AppName:   appName,
 		UserID:    userID,
@@ -124,7 +146,7 @@ func (s *inMemoryService) set(appName, userID, sessionID, fileName string, versi
 		FileName:  fileName,
 		Version:   version,
 	}.Encode()
-	s.artifacts.Set(key, artifact)
+	s.artifacts.Set(key, entry)
 }
 
 func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, version int64) {
@@ -158,7 +180,14 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
 		nextVersion = internalVer + 1
 	}
-	s.set(appName, userID, sessionID, fileName, nextVersion, artifact)
+	// The URI is built from the request's session, not from the user scope key
+	// that may have replaced it above.
+	entry := &artifactEntry{
+		part:         artifact,
+		canonicalURI: memoryCanonicalURI(appName, userID, req.SessionID, fileName, nextVersion),
+		createTime:   platform.Now(ctx),
+	}
+	s.set(appName, userID, sessionID, fileName, nextVersion, entry)
 	return &SaveResponse{Version: nextVersion}, nil
 }
 
@@ -207,18 +236,18 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	defer s.mu.RUnlock()
 
 	if version > 0 {
-		artifact, ok := s.get(appName, userID, sessionID, fileName, version)
+		entry, ok := s.get(appName, userID, sessionID, fileName, version)
 		if !ok {
 			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 		}
-		return &LoadResponse{Part: artifact}, nil
+		return &LoadResponse{Part: entry.part}, nil
 	}
 	// pick the latest version
-	_, artifact, ok := s.find(appName, userID, sessionID, fileName)
+	_, entry, ok := s.find(appName, userID, sessionID, fileName)
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return &LoadResponse{Part: artifact}, nil
+	return &LoadResponse{Part: entry.part}, nil
 }
 
 // List implements [artifact.Service]
@@ -299,12 +328,12 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var artifact *genai.Part
+	var entry *artifactEntry
 	var ok bool
 	if version > 0 {
-		artifact, ok = s.get(appName, userID, sessionID, fileName, version)
+		entry, ok = s.get(appName, userID, sessionID, fileName, version)
 	} else {
-		version, artifact, ok = s.find(appName, userID, sessionID, fileName)
+		version, entry, ok = s.find(appName, userID, sessionID, fileName)
 	}
 
 	if !ok {
@@ -312,14 +341,19 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 	}
 
 	mimeType := "text/plain"
-	if artifact != nil && artifact.InlineData != nil {
-		mimeType = artifact.InlineData.MIMEType
+	if entry.part != nil && entry.part.InlineData != nil {
+		mimeType = entry.part.InlineData.MIMEType
 	}
 
 	return &GetArtifactVersionResponse{
 		ArtifactVersion: &ArtifactVersion{
-			Version:  version,
-			MimeType: mimeType,
+			Version:      version,
+			CanonicalURI: entry.canonicalURI,
+			// The in-memory service cannot be given custom metadata, but the
+			// field is always non-nil, as in gcsartifact.
+			CustomMetadata: map[string]any{},
+			CreateTime:     entry.createTime,
+			MimeType:       mimeType,
 		},
 	}, nil
 }
