@@ -15,7 +15,11 @@
 package controllers
 
 import (
+	"context"
+	"errors"
+	"io/fs"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/gorilla/mux"
@@ -64,19 +68,9 @@ func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, re
 
 // LoadArtifactHandler gets an artifact from the artifact service storage.
 func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req *http.Request) {
-	vars := mux.Vars(req)
-	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	sessionID, artifactName, err := artifactTargetFromVars(mux.Vars(req))
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if sessionID.ID == "" {
-		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
-		return
-	}
-	artifactName := vars["artifact_name"]
-	if artifactName == "" {
-		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
 		return
 	}
 	loadReq := &artifact.LoadRequest{
@@ -108,18 +102,9 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 // LoadArtifactVersionHandler gets an artifact from the artifact service storage with specified version.
 func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
-	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	sessionID, artifactName, err := artifactTargetFromVars(vars)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if sessionID.ID == "" {
-		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
-		return
-	}
-	artifactName := vars["artifact_name"]
-	if artifactName == "" {
-		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
 		return
 	}
 	version := vars["version"]
@@ -153,19 +138,9 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 
 // DeleteArtifactHandler handles deleting an artifact.
 func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, req *http.Request) {
-	vars := mux.Vars(req)
-	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	sessionID, artifactName, err := artifactTargetFromVars(mux.Vars(req))
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if sessionID.ID == "" {
-		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
-		return
-	}
-	artifactName := vars["artifact_name"]
-	if artifactName == "" {
-		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
 		return
 	}
 	err = c.artifactService.Delete(req.Context(), &artifact.DeleteRequest{
@@ -179,4 +154,111 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		return
 	}
 	EncodeJSONResponse(nil, http.StatusOK, rw)
+}
+
+// GetArtifactVersionMetadataHandler returns the metadata of one artifact version.
+func (c *ArtifactsAPIController) GetArtifactVersionMetadataHandler(rw http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	sessionID, artifactName, err := artifactTargetFromVars(vars)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// "latest" asks for the newest version, which GetArtifactVersion expresses
+	// as version 0.
+	var version int64
+	if versionID := vars["version_id"]; versionID != "latest" {
+		parsed, err := strconv.ParseInt(versionID, 10, 64)
+		if err != nil || parsed < 0 {
+			http.Error(rw, "version parameter must be an integer", http.StatusBadRequest)
+			return
+		}
+		version = parsed
+	}
+	metadata, err := c.versionMetadata(req.Context(), sessionID, artifactName, version)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			http.Error(rw, "artifact version not found", http.StatusNotFound)
+			return
+		}
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(metadata, http.StatusOK, rw)
+}
+
+// ListArtifactVersionsMetadataHandler returns the metadata of every version of
+// an artifact, oldest version first.
+func (c *ArtifactsAPIController) ListArtifactVersionsMetadataHandler(rw http.ResponseWriter, req *http.Request) {
+	sessionID, artifactName, err := artifactTargetFromVars(mux.Vars(req))
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	resp, err := c.artifactService.Versions(req.Context(), &artifact.VersionsRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+		FileName:  artifactName,
+	})
+	// An artifact with no versions is an empty list, not an error, as in adk-python.
+	if errors.Is(err, fs.ErrNotExist) {
+		EncodeJSONResponse([]models.ArtifactVersion{}, http.StatusOK, rw)
+		return
+	}
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The in-memory service lists versions newest first.
+	versions := slices.Sorted(slices.Values(resp.Versions))
+	metadata := []models.ArtifactVersion{}
+	for _, version := range versions {
+		one, err := c.versionMetadata(req.Context(), sessionID, artifactName, version)
+		if err != nil {
+			// The version disappeared between the two calls.
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		metadata = append(metadata, one)
+	}
+	EncodeJSONResponse(metadata, http.StatusOK, rw)
+}
+
+// versionMetadata loads the wire metadata of a single artifact version. It
+// reports a missing version as [fs.ErrNotExist].
+func (c *ArtifactsAPIController) versionMetadata(ctx context.Context, sessionID models.SessionID, artifactName string, version int64) (models.ArtifactVersion, error) {
+	resp, err := c.artifactService.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+		FileName:  artifactName,
+		Version:   version,
+	})
+	if err != nil {
+		return models.ArtifactVersion{}, err
+	}
+	if resp.ArtifactVersion == nil {
+		return models.ArtifactVersion{}, fs.ErrNotExist
+	}
+	return models.FromArtifactVersion(resp.ArtifactVersion), nil
+}
+
+// artifactTargetFromVars reads the session and artifact name a request addresses.
+func artifactTargetFromVars(vars map[string]string) (models.SessionID, string, error) {
+	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	if err != nil {
+		return sessionID, "", err
+	}
+	if sessionID.ID == "" {
+		return sessionID, "", errors.New("session_id parameter is required")
+	}
+	artifactName := vars["artifact_name"]
+	if artifactName == "" {
+		return sessionID, "", errors.New("artifact_name parameter is required")
+	}
+	return sessionID, artifactName, nil
 }
