@@ -42,10 +42,7 @@ type AudioCacheManager struct {
 
 // NewAudioCacheManager creates a new AudioCacheManager.
 func NewAudioCacheManager() *AudioCacheManager {
-	return &AudioCacheManager{
-		inputMimeType:  "audio/pcm", // Default to audio/pcm
-		outputMimeType: "audio/pcm", // Default to audio/pcm
-	}
+	return &AudioCacheManager{}
 }
 
 // CacheInput caches incoming user audio data. It caches a chunk only when the
