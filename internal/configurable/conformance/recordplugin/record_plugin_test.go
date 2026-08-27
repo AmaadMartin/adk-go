@@ -257,6 +257,90 @@ func TestRecordPlugin(t *testing.T) {
 		}
 	})
 
+	t.Run("StreamingModeValidation", func(t *testing.T) {
+		const (
+			noneFile = "generated-recordings.yaml"
+			sseFile  = "generated-recordings-sse.yaml"
+		)
+
+		tests := []struct {
+			name     string
+			setMode  bool
+			mode     any
+			wantErr  string // substring the error must contain; "" means no error
+			wantFile string // file expected in the case dir when wantErr == ""
+		}{
+			{name: "SSE", setMode: true, mode: "sse", wantFile: sseFile},
+			{name: "None", setMode: true, mode: "none", wantFile: noneFile},
+			{name: "AbsentDefaultsToNone", wantFile: noneFile},
+			{name: "UnknownString", setMode: true, mode: "bidi", wantErr: `"bidi"`},
+			{name: "MiscasedString", setMode: true, mode: "SSE", wantErr: `"SSE"`},
+			{name: "EmptyString", setMode: true, mode: "", wantErr: `'streaming_mode' is unsupported: ""`},
+			{name: "NonString", setMode: true, mode: 42, wantErr: "is not a string: 42"},
+			{name: "NilValue", setMode: true, mode: nil, wantErr: "is not a string: <nil>"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				tempDir := t.TempDir()
+				p, mockSession, _ := setup(t, tempDir)
+
+				cfg := map[string]any{"dir": tempDir, "user_message_index": 0}
+				if tt.setMode {
+					cfg["streaming_mode"] = tt.mode
+				}
+				if err := mockSession.State().Set("_adk_recordings_config", cfg); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				invContext := &MockInvocationContext{session: mockSession, invocationID: "inv-" + tt.name}
+				_, err := p.BeforeRunCallback()(invContext)
+
+				if tt.wantErr != "" {
+					if err == nil {
+						t.Fatalf("beforeRun returned nil error, want one containing %q", tt.wantErr)
+					}
+					if !strings.Contains(err.Error(), tt.wantErr) {
+						t.Errorf("beforeRun error = %q, want it to contain %q", err, tt.wantErr)
+					}
+					// A rejected mode must not write either fixture file.
+					p.AfterRunCallback()(invContext)
+					for _, name := range []string{noneFile, sseFile} {
+						if _, err := os.Stat(filepath.Join(tempDir, name)); err == nil {
+							t.Errorf("%s was written for a rejected streaming mode", name)
+						}
+					}
+					return
+				}
+
+				if err != nil {
+					t.Fatalf("beforeRun failed: %v", err)
+				}
+
+				cbContext := &MockCallbackContext{state: mockSession.State(), invocationID: invContext.invocationID, agentName: "test_agent"}
+				if _, err := p.BeforeModelCallback()(cbContext, &model.LLMRequest{Model: "model-x"}); err != nil {
+					t.Fatalf("beforeModel failed: %v", err)
+				}
+				resp := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Response"}}}, Partial: false}
+				if _, err := p.AfterModelCallback()(cbContext, resp, nil); err != nil {
+					t.Fatalf("afterModel failed: %v", err)
+				}
+				p.AfterRunCallback()(invContext)
+
+				otherFile := noneFile
+				if tt.wantFile == noneFile {
+					otherFile = sseFile
+				}
+				if _, err := os.Stat(filepath.Join(tempDir, tt.wantFile)); err != nil {
+					t.Errorf("%s was not written: %v", tt.wantFile, err)
+				}
+				if _, err := os.Stat(filepath.Join(tempDir, otherFile)); err == nil {
+					t.Errorf("%s was written, want only %s", otherFile, tt.wantFile)
+				}
+			})
+		}
+	})
+
 	t.Run("MultiTurnAppendAndDeduplication", func(t *testing.T) {
 		tempDir := t.TempDir()
 		p, mockSession, _ := setup(t, tempDir)

@@ -244,9 +244,16 @@ func (p *recordPlugin) parseRecordConfig(sessionState session.State) (string, in
 		return "", 0, "", fmt.Errorf("record config 'user_message_index' is not a number")
 	}
 
-	streamingMode, _ := config["streaming_mode"].(string)
-	if streamingMode == "" {
-		streamingMode = "none"
+	streamingMode := "none"
+	if modeVal, ok := config["streaming_mode"]; ok {
+		mode, ok := modeVal.(string)
+		if !ok {
+			return "", 0, "", fmt.Errorf("record config 'streaming_mode' is not a string: %v", modeVal)
+		}
+		if mode != "sse" && mode != "none" {
+			return "", 0, "", fmt.Errorf("record config 'streaming_mode' is unsupported: %q", mode)
+		}
+		streamingMode = mode
 	}
 
 	return caseDir, msgIndex, streamingMode, nil
@@ -290,8 +297,7 @@ func (p *recordPlugin) createInvocationState(ctx agent.InvocationContext) (*invo
 }
 
 func (p *recordPlugin) saveRecordings(state *invocationRecordState) {
-	// saveRecordings cannot report an error, so an unsupported mode keeps writing
-	// the non-streaming file, as it did before this mapping moved to recording.
+	// parseRecordConfig accepts only "sse" and "none", so the error is always nil.
 	filename, _ := recording.RecordingsFileName(state.streamingMode)
 
 	filePath := filepath.Join(state.caseDir, filename)
