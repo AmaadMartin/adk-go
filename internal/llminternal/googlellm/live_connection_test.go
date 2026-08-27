@@ -391,3 +391,35 @@ func TestSendRealtimeRoutesBlob(t *testing.T) {
 		})
 	}
 }
+
+// TestSendRealtimeNonBlobInput covers the activity signals and the error the
+// default arm returns for an input type the method does not accept.
+func TestSendRealtimeNonBlobInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   any
+		wantErr string
+	}{
+		{name: "activity start", input: &genai.ActivityStart{}},
+		{name: "activity end", input: &genai.ActivityEnd{}},
+		{name: "an unsupported type", input: "text", wantErr: "unsupported real-time input type: string"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, _ := newFakeLiveConnection(t, "test-live-model", genai.BackendGeminiAPI)
+
+			err := conn.SendRealtime(t.Context(), tc.input)
+
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("SendRealtime() = %v, want no error", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Errorf("SendRealtime() = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
