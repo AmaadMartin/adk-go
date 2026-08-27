@@ -73,7 +73,8 @@ type runOptions struct {
 	yieldUserMessage bool
 }
 
-// WithStateDelta sets a state delta for the run invocation.
+// WithStateDelta sets a state delta for the run invocation. Both Run and
+// RunLive apply the delta to session state before the agent starts.
 func WithStateDelta(delta map[string]any) RunOption {
 	return func(o *runOptions) {
 		o.stateDelta = delta
@@ -83,6 +84,7 @@ func WithStateDelta(delta map[string]any) RunOption {
 // WithYieldUserMessage makes Run yield the user message event (after it is
 // appended to the session) before any agent/node events. Mirrors
 // adk-python's yield_user_message. Currently honored by the node path.
+// RunLive returns an error for it, because a live session has no user message.
 func WithYieldUserMessage() RunOption {
 	return func(o *runOptions) {
 		o.yieldUserMessage = true
@@ -425,6 +427,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	for _, opt := range opts {
 		opt(&options)
 	}
+	// Reject before any session I/O, so a rejected call has no side effect.
+	if options.yieldUserMessage {
+		return nil, nil, fmt.Errorf("WithYieldUserMessage is not supported by RunLive: a live session has no user message to yield")
+	}
 
 	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 	if err != nil {
@@ -476,6 +482,19 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		Agent:       agentToRun,
 		UserContent: nil,
 	})
+
+	// Seed the session state before the live agent starts, so the agent and the
+	// before-run plugin callbacks observe it. RunLive has no user message, so
+	// the delta rides on a content-less event of its own rather than through
+	// appendMessageToSession, which is a no-op for a nil message.
+	if len(options.stateDelta) > 0 {
+		stateEvent := session.NewEvent(iCtx, iCtx.InvocationID())
+		stateEvent.Author = "user"
+		stateEvent.Actions.StateDelta = options.stateDelta
+		if err := r.sessionService.AppendEvent(iCtx, storedSession, stateEvent); err != nil {
+			return nil, nil, fmt.Errorf("failed to apply state delta to session: %w", err)
+		}
+	}
 
 	if r.pluginManager != nil {
 		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)

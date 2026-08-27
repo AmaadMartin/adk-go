@@ -15,6 +15,8 @@
 package runner
 
 import (
+	"context"
+	"errors"
 	"iter"
 	"strings"
 	"testing"
@@ -296,5 +298,263 @@ func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 	// Second saved event should be the function call
 	if events.At(1).LLMResponse.Content == nil || events.At(1).LLMResponse.Content.Parts[0].FunctionCall == nil {
 		t.Errorf("expected second saved event to be function call, but got %v", events.At(1))
+	}
+}
+
+const (
+	liveTestApp  = "testApp"
+	liveTestUser = "testUser"
+)
+
+type liveRunLiveFn = func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+
+// appendFailingService is an in-memory session service whose AppendEvent always
+// fails, so the state-delta append error path is reachable.
+type appendFailingService struct {
+	session.Service
+	err error
+}
+
+func (s *appendFailingService) AppendEvent(context.Context, session.Session, *session.Event) error {
+	return s.err
+}
+
+// newLiveTestRunner creates sessionID in service and returns a runner over a
+// mockLiveAgent driven by runLiveFn.
+func newLiveTestRunner(t *testing.T, service session.Service, sessionID string, runLiveFn liveRunLiveFn, plugins ...*plugin.Plugin) *Runner {
+	t.Helper()
+	if _, err := service.Create(t.Context(), &session.CreateRequest{
+		AppName:   liveTestApp,
+		UserID:    liveTestUser,
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(Config{
+		AppName: liveTestApp,
+		Agent: &mockLiveAgent{
+			Agent:     must(agent.New(agent.Config{Name: "test_agent"})),
+			runLiveFn: runLiveFn,
+		},
+		SessionService: service,
+		PluginConfig:   PluginConfig{Plugins: plugins},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// emitOneEvent is a runLiveFn that yields a single bare event.
+func emitOneEvent(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.LLMResponse.Content = genai.NewContentFromText("hi", genai.RoleModel)
+		yield(ev, nil)
+	}, nil
+}
+
+// storedEvents drains events and returns the session as persisted.
+func storedEvents(t *testing.T, service session.Service, sessionID string) session.Events {
+	t.Helper()
+	getResp, err := service.Get(t.Context(), &session.GetRequest{
+		AppName:   liveTestApp,
+		UserID:    liveTestUser,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return getResp.Session.Events()
+}
+
+func drain(t *testing.T, events iter.Seq2[*session.Event, error]) {
+	t.Helper()
+	for _, err := range events {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRunner_RunLive_StateDeltaSeedsSessionBeforeAgentRuns(t *testing.T) {
+	ctx := t.Context()
+	sessionID := "testSessionStateDelta"
+	sessionService := session.InMemoryService()
+
+	var seenByAgent any
+	r := newLiveTestRunner(t, sessionService, sessionID, func(ictx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		// Read inside the agent: this proves the delta lands before it starts.
+		seenByAgent, _ = ictx.Session().State().Get("tenant")
+		return emitOneEvent(ictx)
+	})
+
+	_, events, err := r.RunLive(ctx, liveTestUser, sessionID, agent.LiveRunConfig{},
+		WithStateDelta(map[string]any{"tenant": "acme"}))
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	if seenByAgent != "acme" {
+		t.Errorf("agent saw state tenant=%v, want %q", seenByAgent, "acme")
+	}
+	drain(t, events)
+
+	getResp, err := sessionService.Get(ctx, &session.GetRequest{
+		AppName:   liveTestApp,
+		UserID:    liveTestUser,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := getResp.Session.State().Get("tenant")
+	if err != nil {
+		t.Fatalf("persisted state Get(tenant) failed: %v", err)
+	}
+	if got != "acme" {
+		t.Errorf("persisted state tenant=%v, want %q", got, "acme")
+	}
+
+	persisted := getResp.Session.Events()
+	// One state event plus the single event the agent emitted.
+	if persisted.Len() != 2 {
+		t.Fatalf("persisted %d events, want 2", persisted.Len())
+	}
+	stateEvent := persisted.At(0)
+	if stateEvent.Author != "user" {
+		t.Errorf("state event Author=%q, want %q", stateEvent.Author, "user")
+	}
+	if stateEvent.LLMResponse.Content != nil {
+		t.Errorf("state event carries content %v, want nil", stateEvent.LLMResponse.Content)
+	}
+	if stateEvent.Actions.StateDelta["tenant"] != "acme" {
+		t.Errorf("state event delta tenant=%v, want %q", stateEvent.Actions.StateDelta["tenant"], "acme")
+	}
+	if stateEvent.IsolationScope != "" {
+		t.Errorf("state event IsolationScope=%q, want empty", stateEvent.IsolationScope)
+	}
+}
+
+func TestRunner_RunLive_StateDeltaVisibleToBeforeRunCallback(t *testing.T) {
+	ctx := t.Context()
+	sessionID := "testSessionStateDeltaPlugin"
+
+	var seenByCallback any
+	p, err := plugin.New(plugin.Config{
+		Name: "state_reader",
+		BeforeRunCallback: func(ictx agent.InvocationContext) (*genai.Content, error) {
+			seenByCallback, _ = ictx.Session().State().Get("tenant")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := newLiveTestRunner(t, session.InMemoryService(), sessionID, emitOneEvent, p)
+
+	_, events, err := r.RunLive(ctx, liveTestUser, sessionID, agent.LiveRunConfig{},
+		WithStateDelta(map[string]any{"tenant": "acme"}))
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	drain(t, events)
+
+	if seenByCallback != "acme" {
+		t.Errorf("BeforeRunCallback saw state tenant=%v, want %q", seenByCallback, "acme")
+	}
+}
+
+func TestRunner_RunLive_YieldUserMessageRejected(t *testing.T) {
+	ctx := t.Context()
+	sessionID := "testSessionYieldUserMessage"
+	sessionService := session.InMemoryService()
+
+	var runLiveCalled bool
+	r := newLiveTestRunner(t, sessionService, sessionID, func(ictx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		runLiveCalled = true
+		return emitOneEvent(ictx)
+	})
+
+	sess, events, err := r.RunLive(ctx, liveTestUser, sessionID, agent.LiveRunConfig{}, WithYieldUserMessage())
+	if err == nil {
+		t.Fatal("RunLive succeeded, want an error for WithYieldUserMessage")
+	}
+	if !strings.Contains(err.Error(), "WithYieldUserMessage") {
+		t.Errorf("error %q does not name WithYieldUserMessage", err)
+	}
+	if sess != nil {
+		t.Errorf("RunLive returned session %v, want nil", sess)
+	}
+	if events != nil {
+		t.Error("RunLive returned an event iterator, want nil")
+	}
+	if runLiveCalled {
+		t.Error("the agent's RunLive ran, want no side effect from a rejected call")
+	}
+	if n := storedEvents(t, sessionService, sessionID).Len(); n != 0 {
+		t.Errorf("session holds %d events, want 0", n)
+	}
+}
+
+func TestRunner_RunLive_WithoutStateDeltaAppendsNoExtraEvent(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []RunOption
+	}{
+		{name: "no options"},
+		{name: "nil delta", opts: []RunOption{WithStateDelta(nil)}},
+		{name: "empty delta", opts: []RunOption{WithStateDelta(map[string]any{})}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			sessionID := "testSessionNoDelta"
+			sessionService := session.InMemoryService()
+			r := newLiveTestRunner(t, sessionService, sessionID, emitOneEvent)
+
+			_, events, err := r.RunLive(ctx, liveTestUser, sessionID, agent.LiveRunConfig{}, tt.opts...)
+			if err != nil {
+				t.Fatalf("RunLive failed: %v", err)
+			}
+			drain(t, events)
+
+			persisted := storedEvents(t, sessionService, sessionID)
+			// Only the event the agent emitted: no state event was appended.
+			if persisted.Len() != 1 {
+				t.Fatalf("persisted %d events, want 1", persisted.Len())
+			}
+			if got := persisted.At(0).Author; got == "user" {
+				t.Errorf("persisted a %q-authored event, want none", got)
+			}
+		})
+	}
+}
+
+func TestRunner_RunLive_StateDeltaAppendFailureIsReturned(t *testing.T) {
+	ctx := t.Context()
+	sessionID := "testSessionAppendFails"
+	appendErr := errors.New("boom")
+	sessionService := &appendFailingService{Service: session.InMemoryService(), err: appendErr}
+
+	var runLiveCalled bool
+	r := newLiveTestRunner(t, sessionService, sessionID, func(ictx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+		runLiveCalled = true
+		return emitOneEvent(ictx)
+	})
+
+	sess, events, err := r.RunLive(ctx, liveTestUser, sessionID, agent.LiveRunConfig{},
+		WithStateDelta(map[string]any{"tenant": "acme"}))
+	if err == nil {
+		t.Fatal("RunLive succeeded, want the AppendEvent error")
+	}
+	if !errors.Is(err, appendErr) {
+		t.Errorf("error %q does not wrap the AppendEvent error", err)
+	}
+	if sess != nil || events != nil {
+		t.Errorf("RunLive returned (%v, non-nil iterator=%t), want (nil, nil)", sess, events != nil)
+	}
+	if runLiveCalled {
+		t.Error("the agent's RunLive ran after the state delta failed to apply")
 	}
 }
