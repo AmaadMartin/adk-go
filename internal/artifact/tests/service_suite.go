@@ -469,8 +469,35 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 			if got := resp.ArtifactVersion.MimeType; got != "text/plain" {
 				t.Errorf("GetArtifactVersion(%d).MimeType = %q, want %q", tc.version, got, "text/plain")
 			}
+			if got := resp.ArtifactVersion.CanonicalURI; got == "" {
+				t.Errorf("GetArtifactVersion(%d).CanonicalURI = %q, want a non-empty URI", tc.version, got)
+			}
+			if got := resp.ArtifactVersion.CreateTime; got.IsZero() {
+				t.Errorf("GetArtifactVersion(%d).CreateTime = %v, want a non-zero time", tc.version, got)
+			}
+			if resp.ArtifactVersion.CustomMetadata == nil {
+				t.Errorf("GetArtifactVersion(%d).CustomMetadata = nil, want a non-nil map", tc.version)
+			}
 		})
 	}
+
+	t.Run(fmt.Sprintf("GetArtifactVersion_stable-create-time_%s", testSuffix), func(t *testing.T) {
+		req := &artifact.GetArtifactVersionRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 2,
+		}
+		first, err := srv.GetArtifactVersion(ctx, req)
+		if err != nil {
+			t.Fatalf("GetArtifactVersion(2) failed: %v", err)
+		}
+		second, err := srv.GetArtifactVersion(ctx, req)
+		if err != nil {
+			t.Fatalf("GetArtifactVersion(2) failed: %v", err)
+		}
+		if !first.ArtifactVersion.CreateTime.Equal(second.ArtifactVersion.CreateTime) {
+			t.Errorf("GetArtifactVersion(2).CreateTime = %v then %v, want the same time",
+				first.ArtifactVersion.CreateTime, second.ArtifactVersion.CreateTime)
+		}
+	})
 
 	t.Run(fmt.Sprintf("GetArtifactVersion_nonexistent-version_%s", testSuffix), func(t *testing.T) {
 		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{

@@ -337,6 +337,9 @@ type fakeBlob struct {
 	exists      bool
 	data        []byte
 	contentType string
+	// created is stamped when the blob is written and stays fixed afterwards,
+	// like a real GCS object's creation time.
+	created time.Time
 }
 
 // fakeObject is a handle to a fakeBlob, optionally carrying a does-not-exist
@@ -364,7 +367,7 @@ func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 	if !b.exists {
 		return nil, storage.ErrObjectNotExist
 	}
-	return &storage.ObjectAttrs{Name: b.name, Created: time.Now(), ContentType: b.contentType}, nil
+	return &storage.ObjectAttrs{Name: b.name, Created: b.created, ContentType: b.contentType}, nil
 }
 
 // delete removes the object from the in-memory store.
@@ -422,6 +425,7 @@ func (w *fakeWriter) Close() error {
 	b.data = w.buffer.Bytes()
 	b.contentType = w.contentType
 	b.exists = true
+	b.created = time.Now()
 	return nil
 }
 
