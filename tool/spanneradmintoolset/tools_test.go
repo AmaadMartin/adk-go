@@ -15,201 +15,71 @@
 package spanneradmintoolset
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
+	"cloud.google.com/go/longrunning/autogen/longrunningpb"
+	"cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
 	"cloud.google.com/go/spanner/admin/instance/apiv1/instancepb"
-
-	"google.golang.org/adk/v2/agent"
-	icontext "google.golang.org/adk/v2/internal/context"
-	"google.golang.org/adk/v2/internal/toolinternal"
-	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/tool"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/testing/protocmp"
 )
 
-// errBoom is the failure the fakes report, so a test can assert that the
-// handler wrapped it with %w rather than replacing it.
-var errBoom = errors.New("boom")
-
-// fakeInstanceAdmin records the arguments of the single call a test makes and
-// returns canned results.
-type fakeInstanceAdmin struct {
-	instanceNames []string
-	instance      *instancepb.Instance
-	configNames   []string
-	config        *instancepb.InstanceConfig
-	err           error
-
-	gotProjectID   string
-	gotInstanceID  string
-	gotConfigID    string
-	gotDisplayName string
-	gotNodes       int32
-}
-
-func (f *fakeInstanceAdmin) ListInstances(_ context.Context, projectID string) ([]string, error) {
-	f.gotProjectID = projectID
-	return f.instanceNames, f.err
-}
-
-func (f *fakeInstanceAdmin) GetInstance(_ context.Context, projectID, instanceID string) (*instancepb.Instance, error) {
-	f.gotProjectID, f.gotInstanceID = projectID, instanceID
-	return f.instance, f.err
-}
-
-func (f *fakeInstanceAdmin) ListInstanceConfigs(_ context.Context, projectID string) ([]string, error) {
-	f.gotProjectID = projectID
-	return f.configNames, f.err
-}
-
-func (f *fakeInstanceAdmin) GetInstanceConfig(_ context.Context, projectID, configID string) (*instancepb.InstanceConfig, error) {
-	f.gotProjectID, f.gotConfigID = projectID, configID
-	return f.config, f.err
-}
-
-func (f *fakeInstanceAdmin) CreateInstance(_ context.Context, projectID, instanceID, configID, displayName string, nodes int32) error {
-	f.gotProjectID, f.gotInstanceID, f.gotConfigID = projectID, instanceID, configID
-	f.gotDisplayName, f.gotNodes = displayName, nodes
-	return f.err
-}
-
-// fakeDatabaseAdmin records the arguments of the single call a test makes and
-// returns canned results.
-type fakeDatabaseAdmin struct {
-	databaseNames []string
-	err           error
-
-	gotProjectID  string
-	gotInstanceID string
-	gotDatabaseID string
-}
-
-func (f *fakeDatabaseAdmin) ListDatabases(_ context.Context, projectID, instanceID string) ([]string, error) {
-	f.gotProjectID, f.gotInstanceID = projectID, instanceID
-	return f.databaseNames, f.err
-}
-
-func (f *fakeDatabaseAdmin) CreateDatabase(_ context.Context, projectID, instanceID, databaseID string) error {
-	f.gotProjectID, f.gotInstanceID, f.gotDatabaseID = projectID, instanceID, databaseID
-	return f.err
-}
-
-// testTools builds the seven tools over the given fakes.
-func testTools(t *testing.T, instances instanceAdmin, databases databaseAdmin) []tool.Tool {
+// checkRequest compares the request the fake service received with the one
+// the tool should have sent.
+func checkRequest(t *testing.T, recorder *requestRecorder, want proto.Message) {
 	t.Helper()
-	tools, err := buildTools(instances, databases)
-	if err != nil {
-		t.Fatalf("buildTools() failed: %v", err)
+	if diff := cmp.Diff(want, recorder.lastRequest(), protocmp.Transform()); diff != "" {
+		t.Errorf("request mismatch (-want +got):\n%s", diff)
 	}
-	return tools
 }
 
-// newTestToolset builds a toolset over the given fakes.
-func newTestToolset(t *testing.T, instances instanceAdmin, databases databaseAdmin) *Toolset {
+func checkResult(t *testing.T, got map[string]any, want string) {
 	t.Helper()
-	return newToolset(Config{}, testTools(t, instances, databases))
-}
-
-// runTool invokes the named tool of the toolset with the given raw arguments.
-func runTool(t *testing.T, ts *Toolset, name string, args map[string]any) (map[string]any, error) {
-	t.Helper()
-	tools, err := ts.Tools(nil)
-	if err != nil {
-		t.Fatalf("Tools() failed: %v", err)
-	}
-	for _, candidate := range tools {
-		if candidate.Name() != name {
-			continue
-		}
-		runnable, ok := candidate.(toolinternal.FunctionTool)
-		if !ok {
-			t.Fatalf("tool %q is %T, want toolinternal.FunctionTool", name, candidate)
-		}
-		return runnable.Run(newToolContext(t), args)
-	}
-	t.Fatalf("tool %q not found in toolset", name)
-	return nil, nil
-}
-
-func newToolContext(t *testing.T) agent.Context {
-	t.Helper()
-	invocation := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return agent.NewToolContext(invocation, "", &session.EventActions{}, nil)
-}
-
-// asJSON renders a tool result so a test can pin the exact field names and
-// the difference between [] and null.
-func asJSON(t *testing.T, v any) string {
-	t.Helper()
-	encoded, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("json.Marshal(%v) failed: %v", v, err)
-	}
-	return string(encoded)
-}
-
-// assertWrapped checks that err wraps errBoom and names the resource.
-func assertWrapped(t *testing.T, err error, wantContains string) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("got nil error, want an error wrapping %v", errBoom)
-	}
-	if !errors.Is(err, errBoom) {
-		t.Errorf("errors.Is(err, errBoom) = false for %v, want true", err)
-	}
-	if !strings.Contains(err.Error(), wantContains) {
-		t.Errorf("error %q does not contain %q", err, wantContains)
+	if encoded := asJSON(t, got); encoded != want {
+		t.Errorf("result = %s, want %s", encoded, want)
 	}
 }
 
 func TestListInstances(t *testing.T) {
 	tests := []struct {
-		name  string
-		names []string
-		want  string
+		name      string
+		instances []*instancepb.Instance
+		want      string
 	}{
 		{
 			name: "two instances reduce to short ids",
-			names: []string{
-				"projects/test-project/instances/test-instance-1",
-				"projects/test-project/instances/test-instance-2",
+			instances: []*instancepb.Instance{
+				{Name: "projects/test-project/instances/test-instance-1"},
+				{Name: "projects/test-project/instances/test-instance-2"},
 			},
 			want: `{"instances":["test-instance-1","test-instance-2"]}`,
 		},
 		{
-			name:  "no instances encode as an empty array",
-			names: nil,
-			want:  `{"instances":[]}`,
+			name:      "no instances encode as an empty array",
+			instances: nil,
+			want:      `{"instances":[]}`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			instances := &fakeInstanceAdmin{instanceNames: tc.names}
-			ts := newTestToolset(t, instances, &fakeDatabaseAdmin{})
+			server := &fakeInstanceAdminServer{instances: tc.instances}
+			ts := newTestToolset(t, server, &fakeDatabaseAdminServer{})
 
 			got, err := runTool(t, ts, "spanner_list_instances", map[string]any{"project_id": "test-project"})
 			if err != nil {
 				t.Fatalf("spanner_list_instances failed: %v", err)
 			}
-			if diff := asJSON(t, got); diff != tc.want {
-				t.Errorf("result = %s, want %s", diff, tc.want)
-			}
-			if instances.gotProjectID != "test-project" {
-				t.Errorf("project id = %q, want %q", instances.gotProjectID, "test-project")
-			}
+
+			checkResult(t, got, tc.want)
+			checkRequest(t, &server.requestRecorder, &instancepb.ListInstancesRequest{
+				Parent: "projects/test-project",
+			})
 		})
 	}
-}
-
-func TestListInstancesError(t *testing.T) {
-	ts := newTestToolset(t, &fakeInstanceAdmin{err: errBoom}, &fakeDatabaseAdmin{})
-
-	_, err := runTool(t, ts, "spanner_list_instances", map[string]any{"project_id": "test-project"})
-
-	assertWrapped(t, err, `list instances for project "test-project"`)
 }
 
 func TestGetInstance(t *testing.T) {
@@ -235,7 +105,8 @@ func TestGetInstance(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			instances := &fakeInstanceAdmin{instance: &instancepb.Instance{
+			server := &fakeInstanceAdminServer{instance: &instancepb.Instance{
+				// The tool echoes the requested id, so this name is not used.
 				Name:            "projects/test-project/instances/ignored-name",
 				DisplayName:     "Test Instance",
 				Config:          "projects/test-project/instanceConfigs/regional-us-central1",
@@ -243,7 +114,7 @@ func TestGetInstance(t *testing.T) {
 				ProcessingUnits: 1000,
 				Labels:          tc.labels,
 			}}
-			ts := newTestToolset(t, instances, &fakeDatabaseAdmin{})
+			ts := newTestToolset(t, server, &fakeDatabaseAdminServer{})
 
 			got, err := runTool(t, ts, "spanner_get_instance", map[string]any{
 				"project_id":  "test-project",
@@ -252,74 +123,58 @@ func TestGetInstance(t *testing.T) {
 			if err != nil {
 				t.Fatalf("spanner_get_instance failed: %v", err)
 			}
-			if encoded := asJSON(t, got); encoded != tc.want {
-				t.Errorf("result = %s, want %s", encoded, tc.want)
-			}
-			if instances.gotInstanceID != "test-instance" {
-				t.Errorf("instance id = %q, want %q", instances.gotInstanceID, "test-instance")
-			}
+
+			checkResult(t, got, tc.want)
+			checkRequest(t, &server.requestRecorder, &instancepb.GetInstanceRequest{
+				Name: "projects/test-project/instances/test-instance",
+			})
 		})
 	}
 }
 
-func TestGetInstanceError(t *testing.T) {
-	ts := newTestToolset(t, &fakeInstanceAdmin{err: errBoom}, &fakeDatabaseAdmin{})
-
-	_, err := runTool(t, ts, "spanner_get_instance", map[string]any{
-		"project_id":  "test-project",
-		"instance_id": "test-instance",
-	})
-
-	assertWrapped(t, err, `get instance "test-instance" in project "test-project"`)
-}
-
 func TestListInstanceConfigs(t *testing.T) {
 	tests := []struct {
-		name  string
-		names []string
-		want  string
+		name    string
+		configs []*instancepb.InstanceConfig
+		want    string
 	}{
 		{
 			name: "configs reduce to short ids",
-			names: []string{
-				"projects/test-project/instanceConfigs/regional-us-central1",
-				"projects/test-project/instanceConfigs/nam3",
+			configs: []*instancepb.InstanceConfig{
+				{Name: "projects/test-project/instanceConfigs/regional-us-central1"},
+				{Name: "projects/test-project/instanceConfigs/nam3"},
 			},
 			want: `{"configs":["regional-us-central1","nam3"]}`,
 		},
 		{
-			name:  "no configs encode as an empty array",
-			names: nil,
-			want:  `{"configs":[]}`,
+			name:    "no configs encode as an empty array",
+			configs: nil,
+			want:    `{"configs":[]}`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ts := newTestToolset(t, &fakeInstanceAdmin{configNames: tc.names}, &fakeDatabaseAdmin{})
+			server := &fakeInstanceAdminServer{configs: tc.configs}
+			ts := newTestToolset(t, server, &fakeDatabaseAdminServer{})
 
 			got, err := runTool(t, ts, "spanner_list_instance_configs", map[string]any{"project_id": "test-project"})
 			if err != nil {
 				t.Fatalf("spanner_list_instance_configs failed: %v", err)
 			}
-			if diff := asJSON(t, got); diff != tc.want {
-				t.Errorf("result = %s, want %s", diff, tc.want)
-			}
+
+			checkResult(t, got, tc.want)
+			checkRequest(t, &server.requestRecorder, &instancepb.ListInstanceConfigsRequest{
+				Parent: "projects/test-project",
+			})
 		})
 	}
-}
-
-func TestListInstanceConfigsError(t *testing.T) {
-	ts := newTestToolset(t, &fakeInstanceAdmin{err: errBoom}, &fakeDatabaseAdmin{})
-
-	_, err := runTool(t, ts, "spanner_list_instance_configs", map[string]any{"project_id": "test-project"})
-
-	assertWrapped(t, err, `list instance configs for project "test-project"`)
 }
 
 func TestGetInstanceConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		replicas []*instancepb.ReplicaInfo
+		labels   map[string]string
 		want     string
 	}{
 		{
@@ -329,26 +184,29 @@ func TestGetInstanceConfig(t *testing.T) {
 				Type:                  instancepb.ReplicaInfo_READ_WRITE,
 				DefaultLeaderLocation: true,
 			}},
+			labels: map[string]string{"env": "test"},
 			want: `{"display_name":"us-central1","labels":{"env":"test"},` +
 				`"name":"projects/test-project/instanceConfigs/regional-us-central1",` +
 				`"replicas":[{"default_leader_location":true,"location":"us-central1","type":"READ_WRITE"}]}`,
 		},
 		{
-			name:     "no replicas encode as an empty array",
+			name:     "no replicas and no labels encode as empty",
 			replicas: nil,
-			want: `{"display_name":"us-central1","labels":{"env":"test"},` +
+			labels:   nil,
+			want: `{"display_name":"us-central1","labels":{},` +
 				`"name":"projects/test-project/instanceConfigs/regional-us-central1","replicas":[]}`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			instances := &fakeInstanceAdmin{config: &instancepb.InstanceConfig{
+			server := &fakeInstanceAdminServer{config: &instancepb.InstanceConfig{
+				// Unlike the list tools, this one reports the full resource name.
 				Name:        "projects/test-project/instanceConfigs/regional-us-central1",
 				DisplayName: "us-central1",
 				Replicas:    tc.replicas,
-				Labels:      map[string]string{"env": "test"},
+				Labels:      tc.labels,
 			}}
-			ts := newTestToolset(t, instances, &fakeDatabaseAdmin{})
+			ts := newTestToolset(t, server, &fakeDatabaseAdminServer{})
 
 			got, err := runTool(t, ts, "spanner_get_instance_config", map[string]any{
 				"project_id": "test-project",
@@ -357,25 +215,13 @@ func TestGetInstanceConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("spanner_get_instance_config failed: %v", err)
 			}
-			if diff := asJSON(t, got); diff != tc.want {
-				t.Errorf("result = %s, want %s", diff, tc.want)
-			}
-			if instances.gotConfigID != "regional-us-central1" {
-				t.Errorf("config id = %q, want %q", instances.gotConfigID, "regional-us-central1")
-			}
+
+			checkResult(t, got, tc.want)
+			checkRequest(t, &server.requestRecorder, &instancepb.GetInstanceConfigRequest{
+				Name: "projects/test-project/instanceConfigs/regional-us-central1",
+			})
 		})
 	}
-}
-
-func TestGetInstanceConfigError(t *testing.T) {
-	ts := newTestToolset(t, &fakeInstanceAdmin{err: errBoom}, &fakeDatabaseAdmin{})
-
-	_, err := runTool(t, ts, "spanner_get_instance_config", map[string]any{
-		"project_id": "test-project",
-		"config_id":  "regional-us-central1",
-	})
-
-	assertWrapped(t, err, `get instance config "regional-us-central1" in project "test-project"`)
 }
 
 func TestCreateInstance(t *testing.T) {
@@ -408,68 +254,54 @@ func TestCreateInstance(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			instances := &fakeInstanceAdmin{}
-			ts := newTestToolset(t, instances, &fakeDatabaseAdmin{})
+			server := &fakeInstanceAdminServer{createOp: doneOperation(t, "create-instance", &instancepb.Instance{
+				Name: "projects/test-project/instances/test-instance",
+			})}
+			ts := newTestToolset(t, server, &fakeDatabaseAdminServer{})
 
 			got, err := runTool(t, ts, "spanner_create_instance", tc.args)
 			if err != nil {
 				t.Fatalf("spanner_create_instance failed: %v", err)
 			}
 
-			want := `{"message":"Instance test-instance created successfully."}`
-			if diff := asJSON(t, got); diff != want {
-				t.Errorf("result = %s, want %s", diff, want)
-			}
-			if instances.gotNodes != tc.wantNodes {
-				t.Errorf("nodes = %d, want %d", instances.gotNodes, tc.wantNodes)
-			}
-			if instances.gotConfigID != "regional-us-central1" {
-				t.Errorf("config id = %q, want %q", instances.gotConfigID, "regional-us-central1")
-			}
-			if instances.gotDisplayName != "Test Instance" {
-				t.Errorf("display name = %q, want %q", instances.gotDisplayName, "Test Instance")
-			}
+			checkResult(t, got, `{"message":"Instance test-instance created successfully."}`)
+			checkRequest(t, &server.requestRecorder, &instancepb.CreateInstanceRequest{
+				Parent:     "projects/test-project",
+				InstanceId: "test-instance",
+				Instance: &instancepb.Instance{
+					Config:      "projects/test-project/instanceConfigs/regional-us-central1",
+					DisplayName: "Test Instance",
+					NodeCount:   tc.wantNodes,
+				},
+			})
 		})
 	}
 }
 
-func TestCreateInstanceError(t *testing.T) {
-	ts := newTestToolset(t, &fakeInstanceAdmin{err: errBoom}, &fakeDatabaseAdmin{})
-
-	_, err := runTool(t, ts, "spanner_create_instance", map[string]any{
-		"project_id":   "test-project",
-		"instance_id":  "test-instance",
-		"config_id":    "regional-us-central1",
-		"display_name": "Test Instance",
-	})
-
-	assertWrapped(t, err, `create instance "test-instance" in project "test-project"`)
-}
-
 func TestListDatabases(t *testing.T) {
 	tests := []struct {
-		name  string
-		names []string
-		want  string
+		name      string
+		databases []*databasepb.Database
+		want      string
 	}{
 		{
 			name: "databases reduce to short ids",
-			names: []string{
-				"projects/test-project/instances/test-instance/databases/test-database-1",
-				"projects/test-project/instances/test-instance/databases/test-database-2",
+			databases: []*databasepb.Database{
+				{Name: "projects/test-project/instances/test-instance/databases/test-database-1"},
+				{Name: "projects/test-project/instances/test-instance/databases/test-database-2"},
 			},
 			want: `{"databases":["test-database-1","test-database-2"]}`,
 		},
 		{
-			name:  "no databases encode as an empty array",
-			names: nil,
-			want:  `{"databases":[]}`,
+			name:      "no databases encode as an empty array",
+			databases: nil,
+			want:      `{"databases":[]}`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			databases := &fakeDatabaseAdmin{databaseNames: tc.names}
-			ts := newTestToolset(t, &fakeInstanceAdmin{}, databases)
+			server := &fakeDatabaseAdminServer{databases: tc.databases}
+			ts := newTestToolset(t, &fakeInstanceAdminServer{}, server)
 
 			got, err := runTool(t, ts, "spanner_list_databases", map[string]any{
 				"project_id":  "test-project",
@@ -478,30 +310,20 @@ func TestListDatabases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("spanner_list_databases failed: %v", err)
 			}
-			if diff := asJSON(t, got); diff != tc.want {
-				t.Errorf("result = %s, want %s", diff, tc.want)
-			}
-			if databases.gotInstanceID != "test-instance" {
-				t.Errorf("instance id = %q, want %q", databases.gotInstanceID, "test-instance")
-			}
+
+			checkResult(t, got, tc.want)
+			checkRequest(t, &server.requestRecorder, &databasepb.ListDatabasesRequest{
+				Parent: "projects/test-project/instances/test-instance",
+			})
 		})
 	}
 }
 
-func TestListDatabasesError(t *testing.T) {
-	ts := newTestToolset(t, &fakeInstanceAdmin{}, &fakeDatabaseAdmin{err: errBoom})
-
-	_, err := runTool(t, ts, "spanner_list_databases", map[string]any{
-		"project_id":  "test-project",
-		"instance_id": "test-instance",
-	})
-
-	assertWrapped(t, err, `list databases in instance "test-instance" of project "test-project"`)
-}
-
 func TestCreateDatabase(t *testing.T) {
-	databases := &fakeDatabaseAdmin{}
-	ts := newTestToolset(t, &fakeInstanceAdmin{}, databases)
+	server := &fakeDatabaseAdminServer{createOp: doneOperation(t, "create-database", &databasepb.Database{
+		Name: "projects/test-project/instances/test-instance/databases/db-1",
+	})}
+	ts := newTestToolset(t, &fakeInstanceAdminServer{}, server)
 
 	got, err := runTool(t, ts, "spanner_create_database", map[string]any{
 		"project_id":  "test-project",
@@ -512,25 +334,121 @@ func TestCreateDatabase(t *testing.T) {
 		t.Fatalf("spanner_create_database failed: %v", err)
 	}
 
-	want := `{"message":"Database db-1 created successfully."}`
-	if diff := asJSON(t, got); diff != want {
-		t.Errorf("result = %s, want %s", diff, want)
+	checkResult(t, got, `{"message":"Database db-1 created successfully."}`)
+	checkRequest(t, &server.requestRecorder, &databasepb.CreateDatabaseRequest{
+		Parent:          "projects/test-project/instances/test-instance",
+		CreateStatement: "CREATE DATABASE `db-1`",
+	})
+}
+
+// TestToolErrors checks that a server-side failure reaches the caller as an
+// error that names the resource and keeps the gRPC status code.
+func TestToolErrors(t *testing.T) {
+	ts := newTestToolset(t,
+		&fakeInstanceAdminServer{fail: true},
+		&fakeDatabaseAdminServer{fail: true},
+	)
+
+	tests := []struct {
+		tool     string
+		args     map[string]any
+		wantErr  string
+		wantCode codes.Code
+	}{
+		{
+			tool:    "spanner_list_instances",
+			args:    map[string]any{"project_id": "test-project"},
+			wantErr: `list instances for project "test-project"`,
+		},
+		{
+			tool:    "spanner_get_instance",
+			args:    map[string]any{"project_id": "test-project", "instance_id": "test-instance"},
+			wantErr: `get instance "test-instance" in project "test-project"`,
+		},
+		{
+			tool:    "spanner_list_instance_configs",
+			args:    map[string]any{"project_id": "test-project"},
+			wantErr: `list instance configs for project "test-project"`,
+		},
+		{
+			tool:    "spanner_get_instance_config",
+			args:    map[string]any{"project_id": "test-project", "config_id": "regional-us-central1"},
+			wantErr: `get instance config "regional-us-central1" in project "test-project"`,
+		},
+		{
+			tool: "spanner_create_instance",
+			args: map[string]any{
+				"project_id": "test-project", "instance_id": "test-instance",
+				"config_id": "regional-us-central1", "display_name": "Test Instance",
+			},
+			wantErr: `create instance "test-instance" in project "test-project"`,
+		},
+		{
+			tool:    "spanner_list_databases",
+			args:    map[string]any{"project_id": "test-project", "instance_id": "test-instance"},
+			wantErr: `list databases in instance "test-instance" of project "test-project"`,
+		},
+		{
+			tool: "spanner_create_database",
+			args: map[string]any{
+				"project_id": "test-project", "instance_id": "test-instance", "database_id": "db-1",
+			},
+			wantErr: `create database "db-1" in instance "test-instance" of project "test-project"`,
+		},
 	}
-	if databases.gotDatabaseID != "db-1" {
-		t.Errorf("database id = %q, want %q", databases.gotDatabaseID, "db-1")
+	for _, tc := range tests {
+		t.Run(tc.tool, func(t *testing.T) {
+			got, err := runTool(t, ts, tc.tool, tc.args)
+			if err == nil {
+				t.Fatalf("%s returned %v, want an error", tc.tool, got)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err, tc.wantErr)
+			}
+			// The status code survives only because the handler wraps with %w.
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Errorf("status code = %v, want %v (error: %v)", status.Code(err), codes.FailedPrecondition, err)
+			}
+		})
 	}
 }
 
-func TestCreateDatabaseError(t *testing.T) {
-	ts := newTestToolset(t, &fakeInstanceAdmin{}, &fakeDatabaseAdmin{err: errBoom})
+// TestCreateOperationFailure checks that a long-running operation which
+// completes with an error is reported as an error.
+func TestCreateOperationFailure(t *testing.T) {
+	failedOp := &longrunningpb.Operation{
+		Name:   "create",
+		Done:   true,
+		Result: &longrunningpb.Operation_Error{Error: status.New(codes.ResourceExhausted, "no quota").Proto()},
+	}
+	ts := newTestToolset(t,
+		&fakeInstanceAdminServer{createOp: failedOp},
+		&fakeDatabaseAdminServer{createOp: failedOp},
+	)
 
-	_, err := runTool(t, ts, "spanner_create_database", map[string]any{
-		"project_id":  "test-project",
-		"instance_id": "test-instance",
-		"database_id": "db-1",
-	})
-
-	assertWrapped(t, err, `create database "db-1" in instance "test-instance" of project "test-project"`)
+	tests := []struct {
+		tool string
+		args map[string]any
+	}{
+		{tool: "spanner_create_instance", args: map[string]any{
+			"project_id": "test-project", "instance_id": "test-instance",
+			"config_id": "regional-us-central1", "display_name": "Test Instance",
+		}},
+		{tool: "spanner_create_database", args: map[string]any{
+			"project_id": "test-project", "instance_id": "test-instance", "database_id": "db-1",
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.tool, func(t *testing.T) {
+			got, err := runTool(t, ts, tc.tool, tc.args)
+			if err == nil {
+				t.Fatalf("%s returned %v, want an error", tc.tool, got)
+			}
+			if status.Code(err) != codes.ResourceExhausted {
+				t.Errorf("status code = %v, want %v (error: %v)", status.Code(err), codes.ResourceExhausted, err)
+			}
+		})
+	}
 }
 
 func TestShortIDs(t *testing.T) {
@@ -546,9 +464,8 @@ func TestShortIDs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shortIDs(tc.names)
-			if asJSON(t, got) != asJSON(t, tc.want) {
-				t.Errorf("shortIDs(%q) = %q, want %q", tc.names, got, tc.want)
+			if diff := cmp.Diff(tc.want, shortIDs(tc.names)); diff != "" {
+				t.Errorf("shortIDs(%q) mismatch (-want +got):\n%s", tc.names, diff)
 			}
 		})
 	}

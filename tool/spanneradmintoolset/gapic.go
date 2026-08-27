@@ -30,32 +30,30 @@ import (
 // adk-python's timeout=300.
 const createTimeout = 5 * time.Minute
 
-// gapicInstanceAdmin adapts the generated instance admin client to
-// instanceAdmin. It only builds requests and delegates.
-type gapicInstanceAdmin struct {
-	client *instance.InstanceAdminClient
-}
-
-func (a *gapicInstanceAdmin) ListInstances(ctx context.Context, projectID string) ([]string, error) {
-	it := a.client.ListInstances(ctx, &instancepb.ListInstancesRequest{Parent: projectPath(projectID)})
+// listInstances returns the full resource name of every instance in a project.
+func listInstances(ctx context.Context, client *instance.InstanceAdminClient, projectID string) ([]string, error) {
+	it := client.ListInstances(ctx, &instancepb.ListInstancesRequest{Parent: projectPath(projectID)})
 	return collectNames(it.All(), (*instancepb.Instance).GetName)
 }
 
-func (a *gapicInstanceAdmin) GetInstance(ctx context.Context, projectID, instanceID string) (*instancepb.Instance, error) {
-	return a.client.GetInstance(ctx, &instancepb.GetInstanceRequest{Name: instancePath(projectID, instanceID)})
+func getInstance(ctx context.Context, client *instance.InstanceAdminClient, projectID, instanceID string) (*instancepb.Instance, error) {
+	return client.GetInstance(ctx, &instancepb.GetInstanceRequest{Name: instancePath(projectID, instanceID)})
 }
 
-func (a *gapicInstanceAdmin) ListInstanceConfigs(ctx context.Context, projectID string) ([]string, error) {
-	it := a.client.ListInstanceConfigs(ctx, &instancepb.ListInstanceConfigsRequest{Parent: projectPath(projectID)})
+// listInstanceConfigs returns the full resource name of every instance config
+// available to a project.
+func listInstanceConfigs(ctx context.Context, client *instance.InstanceAdminClient, projectID string) ([]string, error) {
+	it := client.ListInstanceConfigs(ctx, &instancepb.ListInstanceConfigsRequest{Parent: projectPath(projectID)})
 	return collectNames(it.All(), (*instancepb.InstanceConfig).GetName)
 }
 
-func (a *gapicInstanceAdmin) GetInstanceConfig(ctx context.Context, projectID, configID string) (*instancepb.InstanceConfig, error) {
-	return a.client.GetInstanceConfig(ctx, &instancepb.GetInstanceConfigRequest{Name: instanceConfigPath(projectID, configID)})
+func getInstanceConfig(ctx context.Context, client *instance.InstanceAdminClient, projectID, configID string) (*instancepb.InstanceConfig, error) {
+	return client.GetInstanceConfig(ctx, &instancepb.GetInstanceConfigRequest{Name: instanceConfigPath(projectID, configID)})
 }
 
-func (a *gapicInstanceAdmin) CreateInstance(ctx context.Context, projectID, instanceID, configID, displayName string, nodes int32) error {
-	op, err := a.client.CreateInstance(ctx, &instancepb.CreateInstanceRequest{
+// createInstance provisions an instance and waits for the operation to finish.
+func createInstance(ctx context.Context, client *instance.InstanceAdminClient, projectID, instanceID, configID, displayName string, nodes int32) error {
+	op, err := client.CreateInstance(ctx, &instancepb.CreateInstanceRequest{
 		Parent:     projectPath(projectID),
 		InstanceId: instanceID,
 		Instance: &instancepb.Instance{
@@ -73,19 +71,15 @@ func (a *gapicInstanceAdmin) CreateInstance(ctx context.Context, projectID, inst
 	return err
 }
 
-// gapicDatabaseAdmin adapts the generated database admin client to
-// databaseAdmin. It only builds requests and delegates.
-type gapicDatabaseAdmin struct {
-	client *database.DatabaseAdminClient
-}
-
-func (a *gapicDatabaseAdmin) ListDatabases(ctx context.Context, projectID, instanceID string) ([]string, error) {
-	it := a.client.ListDatabases(ctx, &databasepb.ListDatabasesRequest{Parent: instancePath(projectID, instanceID)})
+// listDatabases returns the full resource name of every database in an instance.
+func listDatabases(ctx context.Context, client *database.DatabaseAdminClient, projectID, instanceID string) ([]string, error) {
+	it := client.ListDatabases(ctx, &databasepb.ListDatabasesRequest{Parent: instancePath(projectID, instanceID)})
 	return collectNames(it.All(), (*databasepb.Database).GetName)
 }
 
-func (a *gapicDatabaseAdmin) CreateDatabase(ctx context.Context, projectID, instanceID, databaseID string) error {
-	op, err := a.client.CreateDatabase(ctx, &databasepb.CreateDatabaseRequest{
+// createDatabase provisions a database and waits for the operation to finish.
+func createDatabase(ctx context.Context, client *database.DatabaseAdminClient, projectID, instanceID, databaseID string) error {
+	op, err := client.CreateDatabase(ctx, &databasepb.CreateDatabaseRequest{
 		Parent:          instancePath(projectID, instanceID),
 		CreateStatement: fmt.Sprintf("CREATE DATABASE `%s`", databaseID),
 	})

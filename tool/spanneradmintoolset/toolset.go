@@ -26,6 +26,9 @@
 //	}
 //	defer ts.Close()
 //
+// To expose only some of the seven tools, wrap the toolset with
+// [tool.FilterToolset].
+//
 // The tools spanner_create_instance and spanner_create_database provision
 // billable Google Cloud resources. Neither asks for confirmation, which
 // matches adk-python. Wrap the toolset to gate them:
@@ -51,7 +54,6 @@ import (
 
 	database "cloud.google.com/go/spanner/admin/database/apiv1"
 	instance "cloud.google.com/go/spanner/admin/instance/apiv1"
-	"cloud.google.com/go/spanner/admin/instance/apiv1/instancepb"
 	"google.golang.org/api/option"
 
 	"google.golang.org/adk/v2/agent"
@@ -69,8 +71,6 @@ type Config struct {
 	ClientOptions []option.ClientOption
 	// Name overrides the toolset name. Defaults to "SpannerAdminToolset".
 	Name string
-	// ToolFilter selects which tools the toolset exposes. Nil exposes all of them.
-	ToolFilter tool.Predicate
 }
 
 // Toolset groups the Spanner admin tools. Create it with New and release it
@@ -78,29 +78,10 @@ type Config struct {
 type Toolset struct {
 	name    string
 	tools   []tool.Tool
-	filter  tool.Predicate
 	closers []io.Closer
 }
 
 var _ tool.Toolset = (*Toolset)(nil)
-
-// instanceAdmin is the instance half of the Spanner Admin API that this
-// package uses. The list method returns full resource names; the caller
-// shortens them.
-type instanceAdmin interface {
-	ListInstances(ctx context.Context, projectID string) ([]string, error)
-	GetInstance(ctx context.Context, projectID, instanceID string) (*instancepb.Instance, error)
-	ListInstanceConfigs(ctx context.Context, projectID string) ([]string, error)
-	GetInstanceConfig(ctx context.Context, projectID, configID string) (*instancepb.InstanceConfig, error)
-	CreateInstance(ctx context.Context, projectID, instanceID, configID, displayName string, nodes int32) error
-}
-
-// databaseAdmin is the database half of the Spanner Admin API that this
-// package uses.
-type databaseAdmin interface {
-	ListDatabases(ctx context.Context, projectID, instanceID string) ([]string, error)
-	CreateDatabase(ctx context.Context, projectID, instanceID, databaseID string) error
-}
 
 // New creates a Spanner admin toolset backed by the Spanner Admin API. The
 // caller must call Close to release the underlying gRPC connections.
@@ -113,7 +94,7 @@ func New(ctx context.Context, cfg Config) (*Toolset, error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("create Spanner database admin client: %w", err), instances.Close())
 	}
-	tools, err := buildTools(&gapicInstanceAdmin{client: instances}, &gapicDatabaseAdmin{client: databases})
+	tools, err := buildTools(instances, databases)
 	if err != nil {
 		return nil, errors.Join(err, instances.Close(), databases.Close())
 	}
@@ -127,25 +108,15 @@ func newToolset(cfg Config, tools []tool.Tool, closers ...io.Closer) *Toolset {
 	if name == "" {
 		name = defaultName
 	}
-	return &Toolset{name: name, tools: tools, filter: cfg.ToolFilter, closers: closers}
+	return &Toolset{name: name, tools: tools, closers: closers}
 }
 
 // Name implements tool.Toolset. It returns the name of the toolset.
 func (ts *Toolset) Name() string { return ts.name }
 
-// Tools implements tool.Toolset. It returns the tools that Config.ToolFilter
-// selects, or all of them when the filter is nil.
+// Tools implements tool.Toolset. It returns all seven admin tools.
 func (ts *Toolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	if ts.filter == nil {
-		return ts.tools, nil
-	}
-	selected := make([]tool.Tool, 0, len(ts.tools))
-	for _, t := range ts.tools {
-		if ts.filter(ctx, t) {
-			selected = append(selected, t)
-		}
-	}
-	return selected, nil
+	return ts.tools, nil
 }
 
 // Close releases the Spanner admin clients. Call it once, when the toolset is
