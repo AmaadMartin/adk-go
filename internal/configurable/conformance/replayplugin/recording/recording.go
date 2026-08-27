@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -27,17 +28,15 @@ import (
 // always agree on the name.
 //
 // An absent, nil or empty mode selects the non-streaming file. An unsupported
-// mode returns an error, along with the non-streaming file name so that a
-// caller which cannot report the error still has a usable name.
+// mode returns an error and an empty name.
 func RecordingsFileName(streamingMode any) (string, error) {
-	const nonStreaming = "generated-recordings.yaml"
 	switch streamingMode {
-	case nil, "", "none":
-		return nonStreaming, nil
-	case "sse":
+	case nil, "", string(agent.StreamingModeNone):
+		return "generated-recordings.yaml", nil
+	case string(agent.StreamingModeSSE):
 		return "generated-recordings-sse.yaml", nil
 	default:
-		return nonStreaming, fmt.Errorf("unsupported streaming mode: %v", streamingMode)
+		return "", fmt.Errorf("unsupported streaming mode: %v", streamingMode)
 	}
 }
 
