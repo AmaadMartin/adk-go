@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,7 +90,7 @@ func TestQueryWriteDeadline(t *testing.T) {
 			if err != nil {
 				t.Fatalf("http.Post() failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != http.StatusOK {
 				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -104,6 +105,44 @@ func TestQueryWriteDeadline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestQueryDeadlineUnsupported covers the failure branch of the guard. An
+// httptest.ResponseRecorder has no connection, so SetWriteDeadline returns
+// http.ErrNotSupported; Query must log it and serve the response anyway.
+func TestQueryDeadlineUnsupported(t *testing.T) {
+	lines := []string{`{"n":1}`, `{"n":2}`}
+	stub := &streamingStub{name: "async_stream_query", lines: lines}
+	c, err := NewAgentEngineAPIController(nil, 30*time.Second, 1<<20, []method.MethodHandler{stub})
+	if err != nil {
+		t.Fatalf("NewAgentEngineAPIController() failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/stream_reasoning_engine",
+		strings.NewReader(`{"class_method":"async_stream_query","input":{}}`))
+	rec := httptest.NewRecorder()
+	c.Query(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	for _, line := range lines {
+		if !strings.Contains(rec.Body.String(), line) {
+			t.Errorf("body = %q, want it to contain %q", rec.Body.String(), line)
+		}
+	}
+}
+
+// TestNewAgentEngineAPIControllerDuplicateMethod covers the constructor's
+// rejection of two handlers sharing a name.
+func TestNewAgentEngineAPIControllerDuplicateMethod(t *testing.T) {
+	handlers := []method.MethodHandler{
+		&streamingStub{name: "async_stream_query"},
+		&streamingStub{name: "async_stream_query"},
+	}
+	if _, err := NewAgentEngineAPIController(nil, 0, 1<<20, handlers); err == nil {
+		t.Error("NewAgentEngineAPIController() succeeded, want a duplicate method name error")
 	}
 }
 
@@ -124,10 +163,34 @@ func TestQueryUnknownClassMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http.Post() failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+// failingReader fails on the first read, standing in for a request body that
+// breaks mid-transfer.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("broken body") }
+
+// TestQueryUnreadableBody covers the error path where reading the request body
+// fails: Query must answer 400.
+func TestQueryUnreadableBody(t *testing.T) {
+	stub := &streamingStub{name: "async_stream_query", lines: []string{`{"n":1}`}}
+	c, err := NewAgentEngineAPIController(nil, 0, 1<<20, []method.MethodHandler{stub})
+	if err != nil {
+		t.Fatalf("NewAgentEngineAPIController() failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/stream_reasoning_engine", failingReader{})
+	rec := httptest.NewRecorder()
+	c.Query(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
@@ -147,7 +210,7 @@ func TestQueryMalformedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http.Post() failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
