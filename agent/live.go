@@ -32,7 +32,33 @@ type LiveRequest struct {
 	// Content represents standard text or multimodal content from the user.
 	// Can also represent a reply to a tool call if it contains a FunctionResponse part.
 	Content *genai.Content
+
+	// AudioStreamEnd signals that the audio stream has ended, for example
+	// because the microphone was turned off, so the model flushes the audio it
+	// has buffered instead of waiting for more. It applies only when automatic
+	// activity detection (Voice Activity Detection) is enabled, and is ignored
+	// when RealtimeInput is set: send it as a request of its own.
+	AudioStreamEnd bool
+
+	// Partial marks Content as an intermediate update that does not complete
+	// the current model turn. A partial request is sent to the model but is not
+	// recorded as a user content event in session history.
+	Partial bool
+
+	// StateDelta holds session state changes to apply alongside this request,
+	// for example &map[string]any{"ui_locale": "fr-FR"}. It is applied whether
+	// or not the request carries content, so a state change still lands for a
+	// content-less, partial, or function-response request.
+	//
+	// It is a pointer to a map rather than a map so that LiveRequest stays
+	// comparable, which a map field would take away from every caller.
+	StateDelta *map[string]any
 }
+
+// LiveRequest must stay comparable: a map or slice field would remove == from
+// every caller, and only the apidiff job would notice. This stops compiling
+// first.
+var _ = map[LiveRequest]struct{}(nil)
 
 // LiveRunConfig contains options for configuring a live session.
 type LiveRunConfig struct {

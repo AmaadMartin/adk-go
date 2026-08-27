@@ -468,7 +468,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							return
 						}
 						if req.Content != nil {
-							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
+							if err := liveConn.SendContent(connCtx, req.Content, req.Partial); err != nil {
 								select {
 								case errChan <- err:
 								case <-connCtx.Done():
@@ -481,6 +481,16 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
+								select {
+								case errChan <- err:
+								case <-connCtx.Done():
+								}
+								return
+							}
+						} else if req.AudioStreamEnd {
+							// Realtime input and an audio-stream-end flag in one
+							// request is meaningless, so the input wins.
+							if err := liveConn.SendRealtime(connCtx, &genai.LiveRealtimeInput{AudioStreamEnd: true}); err != nil {
 								select {
 								case errChan <- err:
 								case <-connCtx.Done():
@@ -559,7 +569,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								return
 							}
 							// Send function response back to model
-							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
+							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content, false); err != nil {
 								sess.pushError(err)
 								cleanup()
 								return

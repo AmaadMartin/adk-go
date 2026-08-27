@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
+	"slices"
 	"time"
 
 	"google.golang.org/genai"
@@ -372,35 +374,45 @@ type runnerLiveSession struct {
 	storedSession session.Session
 }
 
+// hasFunctionResponse reports whether content replies to a tool call rather
+// than carrying user input. Such a reply is recorded by the flow, not here.
+func hasFunctionResponse(content *genai.Content) bool {
+	return slices.ContainsFunc(content.Parts, func(p *genai.Part) bool { return p.FunctionResponse != nil })
+}
+
 func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
-	err := s.sess.Send(req)
-	if err != nil {
+	if err := s.sess.Send(req); err != nil {
 		return err
 	}
 
-	// Save user text content to session history
-	if req.Content != nil && len(req.Content.Parts) > 0 {
-		// Skip function responses - they are handled separately
-		isFunctionResponse := false
-		for _, part := range req.Content.Parts {
-			if part.FunctionResponse != nil {
-				isFunctionResponse = true
-				break
-			}
-		}
-
-		if !isFunctionResponse {
-			event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
-			event.Author = "user"
-			event.LLMResponse = model.LLMResponse{
-				Content: req.Content,
-			}
-			if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
-				return fmt.Errorf("failed to add user event to session: %w", err)
-			}
-		}
+	var stateDelta map[string]any
+	if req.StateDelta != nil {
+		stateDelta = *req.StateDelta
 	}
 
+	// One event at most: the state delta rides on the user content event when
+	// there is one, and lands on an event of its own otherwise. A partial turn
+	// is an intermediate update, so it stays out of history.
+	event := session.NewEvent(s.iCtx, s.iCtx.InvocationID())
+	event.Author = "user"
+	kind := "state delta"
+	hasContent := req.Content != nil && len(req.Content.Parts) > 0
+	if hasContent && !req.Partial && !hasFunctionResponse(req.Content) {
+		event.LLMResponse = model.LLMResponse{
+			Content: req.Content,
+		}
+		kind = "user"
+	} else if len(stateDelta) == 0 {
+		return nil
+	}
+
+	// session.NewEvent allocates Actions.StateDelta: copy into it rather than
+	// replacing it, because an empty map and a nil map mean different things on
+	// the wire, and the caller keeps ownership of the map it passed.
+	maps.Copy(event.Actions.StateDelta, stateDelta)
+	if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
+		return fmt.Errorf("failed to add %s event to session: %w", kind, err)
+	}
 	return nil
 }
 
