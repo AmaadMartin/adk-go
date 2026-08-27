@@ -273,11 +273,13 @@ func TestRecordPlugin(t *testing.T) {
 			{name: "SSE", setMode: true, mode: "sse", wantFile: sseFile},
 			{name: "None", setMode: true, mode: "none", wantFile: noneFile},
 			{name: "AbsentDefaultsToNone", wantFile: noneFile},
-			{name: "UnknownString", setMode: true, mode: "bidi", wantErr: `"bidi"`},
-			{name: "MiscasedString", setMode: true, mode: "SSE", wantErr: `"SSE"`},
-			{name: "EmptyString", setMode: true, mode: "", wantErr: `'streaming_mode' is unsupported: ""`},
-			{name: "NonString", setMode: true, mode: 42, wantErr: "is not a string: 42"},
-			{name: "NilValue", setMode: true, mode: nil, wantErr: "is not a string: <nil>"},
+			// Replay reads an empty or nil mode as non-streaming, so record must
+			// write the file that replay reads.
+			{name: "EmptyString", setMode: true, mode: "", wantFile: noneFile},
+			{name: "NilValue", setMode: true, mode: nil, wantFile: noneFile},
+			{name: "UnknownString", setMode: true, mode: "bidi", wantErr: "unsupported streaming mode: bidi"},
+			{name: "MiscasedString", setMode: true, mode: "SSE", wantErr: "unsupported streaming mode: SSE"},
+			{name: "NonString", setMode: true, mode: 42, wantErr: "unsupported streaming mode: 42"},
 		}
 
 		for _, tt := range tests {

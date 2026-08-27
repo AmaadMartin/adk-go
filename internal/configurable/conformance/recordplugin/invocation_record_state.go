@@ -27,7 +27,7 @@ type invocationRecordState struct {
 	mu               sync.Mutex
 	caseDir          string
 	userMessageIndex int
-	streamingMode    string
+	recordingsFile   string
 
 	// Completed recordings for the current invocation turn
 	recordings []recording.Recording
@@ -40,11 +40,11 @@ type invocationRecordState struct {
 	pendingToolCalls map[string]*genai.FunctionCall
 }
 
-func newInvocationRecordState(caseDir string, msgIndex int, streamingMode string) *invocationRecordState {
+func newInvocationRecordState(caseDir string, msgIndex int, recordingsFile string) *invocationRecordState {
 	return &invocationRecordState{
 		caseDir:          caseDir,
 		userMessageIndex: msgIndex,
-		streamingMode:    streamingMode,
+		recordingsFile:   recordingsFile,
 		pendingToolCalls: make(map[string]*genai.FunctionCall),
 	}
 }
