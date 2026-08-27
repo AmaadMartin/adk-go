@@ -206,64 +206,52 @@ func TestRealtimeBlob(t *testing.T) {
 	tests := []struct {
 		name string
 		in   *genai.Blob
-		// wantSame is true when realtimeBlob may return the caller's pointer,
-		// which it does only when no sniffing is needed.
-		wantSame bool
-		want     genai.Blob
+		want genai.Blob
 	}{
 		{
-			name:     "png signature with a payload",
-			in:       &genai.Blob{Data: append(slices.Clone(signature), 'p', 'a', 'y')},
-			wantSame: false,
-			want:     genai.Blob{Data: append(slices.Clone(signature), 'p', 'a', 'y'), MIMEType: "image/png"},
+			name: "png signature with a payload",
+			in:   &genai.Blob{Data: append(slices.Clone(signature), 'p', 'a', 'y')},
+			want: genai.Blob{Data: append(slices.Clone(signature), 'p', 'a', 'y'), MIMEType: "image/png"},
 		},
 		{
-			name:     "exactly the png signature",
-			in:       &genai.Blob{Data: slices.Clone(signature)},
-			wantSame: false,
-			want:     genai.Blob{Data: slices.Clone(signature), MIMEType: "image/png"},
+			name: "exactly the png signature",
+			in:   &genai.Blob{Data: slices.Clone(signature)},
+			want: genai.Blob{Data: slices.Clone(signature), MIMEType: "image/png"},
 		},
 		{
-			name:     "bytes that are not png",
-			in:       &genai.Blob{Data: pcm},
-			wantSame: false,
-			want:     genai.Blob{Data: pcm, MIMEType: "audio/pcm"},
+			name: "bytes that are not png",
+			in:   &genai.Blob{Data: pcm},
+			want: genai.Blob{Data: pcm, MIMEType: "audio/pcm"},
 		},
 		{
-			name:     "a truncated png signature",
-			in:       &genai.Blob{Data: signature[:7]},
-			wantSame: false,
-			want:     genai.Blob{Data: signature[:7], MIMEType: "audio/pcm"},
+			name: "a truncated png signature",
+			in:   &genai.Blob{Data: signature[:7]},
+			want: genai.Blob{Data: signature[:7], MIMEType: "audio/pcm"},
 		},
 		{
-			name:     "the last signature byte differs",
-			in:       &genai.Blob{Data: append(slices.Clone(signature[:7]), 0x0B)},
-			wantSame: false,
-			want:     genai.Blob{Data: append(slices.Clone(signature[:7]), 0x0B), MIMEType: "audio/pcm"},
+			name: "the last signature byte differs",
+			in:   &genai.Blob{Data: append(slices.Clone(signature[:7]), 0x0B)},
+			want: genai.Blob{Data: append(slices.Clone(signature[:7]), 0x0B), MIMEType: "audio/pcm"},
 		},
 		{
-			name:     "no data at all",
-			in:       &genai.Blob{},
-			wantSame: false,
-			want:     genai.Blob{MIMEType: "audio/pcm"},
+			name: "no data at all",
+			in:   &genai.Blob{},
+			want: genai.Blob{MIMEType: "audio/pcm"},
 		},
 		{
-			name:     "the copy keeps every other field",
-			in:       &genai.Blob{Data: slices.Clone(signature), DisplayName: "frame.png"},
-			wantSame: false,
-			want:     genai.Blob{Data: slices.Clone(signature), DisplayName: "frame.png", MIMEType: "image/png"},
+			name: "the copy keeps every other field",
+			in:   &genai.Blob{Data: slices.Clone(signature), DisplayName: "frame.png"},
+			want: genai.Blob{Data: slices.Clone(signature), DisplayName: "frame.png", MIMEType: "image/png"},
 		},
 		{
-			name:     "an explicit mime type is passed through",
-			in:       &genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=16000"},
-			wantSame: true,
-			want:     genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=16000"},
+			name: "an explicit mime type is passed through",
+			in:   &genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=16000"},
+			want: genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=16000"},
 		},
 		{
-			name:     "an explicit mime type wins over the png signature",
-			in:       &genai.Blob{Data: slices.Clone(signature), MIMEType: "image/jpeg"},
-			wantSame: true,
-			want:     genai.Blob{Data: slices.Clone(signature), MIMEType: "image/jpeg"},
+			name: "an explicit mime type wins over the png signature",
+			in:   &genai.Blob{Data: slices.Clone(signature), MIMEType: "image/jpeg"},
+			want: genai.Blob{Data: slices.Clone(signature), MIMEType: "image/jpeg"},
 		},
 	}
 
@@ -273,8 +261,8 @@ func TestRealtimeBlob(t *testing.T) {
 
 			got := realtimeBlob(tc.in)
 
-			if same := got == tc.in; same != tc.wantSame {
-				t.Errorf("realtimeBlob() returned the caller's pointer = %t, want %t", same, tc.wantSame)
+			if got == tc.in {
+				t.Error("realtimeBlob() returned the caller's pointer, want a copy")
 			}
 			if diff := cmp.Diff(tc.want, *got); diff != "" {
 				t.Errorf("realtimeBlob() returned an unexpected blob (-want +got):\n%s", diff)

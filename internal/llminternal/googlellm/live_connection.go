@@ -162,19 +162,17 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 // pngSignature is the 8-byte header that every PNG stream starts with.
 var pngSignature = []byte("\x89PNG\r\n\x1a\n")
 
-// realtimeBlob returns the blob to send for b. When b carries no MIME type,
-// realtimeBlob returns a copy that carries a sniffed type instead of writing
-// the type back into b. A caller may reuse one Blob value across sends, and a
-// type written back would stick to every later send through that value.
+// realtimeBlob returns a copy of b to send, carrying a sniffed MIME type when
+// b has none. The copy is unconditional so that b stays the caller's alone: a
+// caller may reuse one Blob value across sends, and a type written back would
+// stick to every later send through that value.
 func realtimeBlob(b *genai.Blob) *genai.Blob {
-	if b.MIMEType != "" {
-		return b
-	}
 	sent := *b
-	if bytes.HasPrefix(b.Data, pngSignature) {
-		sent.MIMEType = "image/png"
-	} else {
+	if sent.MIMEType == "" {
 		sent.MIMEType = "audio/pcm"
+		if bytes.HasPrefix(sent.Data, pngSignature) {
+			sent.MIMEType = "image/png"
+		}
 	}
 	return &sent
 }
