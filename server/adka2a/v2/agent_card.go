@@ -16,7 +16,6 @@ package adka2a
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -61,11 +60,14 @@ func buildSubAgentSkills(agent agent.Agent) []a2a.AgentSkill {
 }
 
 func buildLLMAgentSkills(agent agent.Agent, llmState *llminternal.State) []a2a.AgentSkill {
+	// The card is a discovery document served without authentication, so the
+	// description comes from the agent's own public description and never from
+	// its instructions.
 	skills := []a2a.AgentSkill{
 		{
 			ID:          agent.Name(),
 			Name:        "model",
-			Description: buildDescriptionFromInstructions(agent, llmState),
+			Description: buildAgentDescription(agent, getInternalState(agent)),
 			Tags:        []string{"llm"},
 		},
 	}
@@ -213,49 +215,6 @@ func buildLoopAgentDescription(agnt agent.Agent, state *iagent.State) string {
 		}
 	}
 	return fmt.Sprintf("%s in a loop (max %s iterations).", strings.Join(descriptions, " "), maxIterations)
-}
-
-func buildDescriptionFromInstructions(agent agent.Agent, llmState *llminternal.State) string {
-	state := getInternalState(agent)
-	descriptionParts := []string{}
-	if agent.Description() != "" {
-		descriptionParts = append(descriptionParts, agent.Description())
-	}
-	if llmState.Instruction != "" {
-		descriptionParts = append(descriptionParts, replacePronouns(llmState.Instruction))
-	}
-	if llmState.GlobalInstruction != "" {
-		descriptionParts = append(descriptionParts, replacePronouns(llmState.GlobalInstruction))
-	}
-	description := getDefaultAgentDescription(state)
-	if len(descriptionParts) > 0 {
-		description = strings.Join(descriptionParts, " ")
-	}
-	return description
-}
-
-// Replaces pronouns and conjugate common verbs for agent description.
-// Examples: "You are" -> "I am", "your" -> "my"
-func replacePronouns(instruction string) string {
-	substitutions := []struct {
-		original string
-		target   string
-	}{
-		// Keep sorted by len(original) DESC to ensure longer phrases are matched first
-		// which prevents "you" in "you are" from being replaced on its own.
-		{"you were", "I was"},
-		{"you are", "I am"},
-		{"you're", "I am"},
-		{"you've", "I have"},
-		{"yours", "mine"},
-		{"your", "my"},
-		{"you", "I"},
-	}
-	for _, sub := range substitutions {
-		pattern := regexp.MustCompile(fmt.Sprintf(`(?i)\b%s\b`, sub.original))
-		instruction = pattern.ReplaceAllString(instruction, sub.target)
-	}
-	return instruction
 }
 
 func getDefaultAgentDescription(state *iagent.State) string {
