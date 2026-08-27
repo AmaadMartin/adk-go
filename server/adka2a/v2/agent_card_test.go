@@ -15,6 +15,8 @@
 package adka2a
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -64,7 +66,34 @@ func TestGetAgentSkills_LLMAgent(t *testing.T) {
 			})),
 			want: []a2a.AgentSkill{{
 				ID:          "Test LLM",
-				Description: "Test llm. I am a helpful agent, only respond with useful information.",
+				Description: "Test llm.",
+				Name:        "model",
+				Tags:        []string{"llm"},
+			}},
+		},
+		{
+			name: "llm with instruction and no description",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:        "Test LLM",
+				Instruction: "You are a support agent.",
+			})),
+			want: []a2a.AgentSkill{{
+				ID:          "Test LLM",
+				Description: "An LLM-based agent",
+				Name:        "model",
+				Tags:        []string{"llm"},
+			}},
+		},
+		{
+			name: "llm with global instruction",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:              "Test LLM",
+				Description:       "Test llm.",
+				GlobalInstruction: "Always answer in English.",
+			})),
+			want: []a2a.AgentSkill{{
+				ID:          "Test LLM",
+				Description: "Test llm.",
 				Name:        "model",
 				Tags:        []string{"llm"},
 			}},
@@ -346,52 +375,43 @@ func TestGetAgentSkills_LLMAgent(t *testing.T) {
 	}
 }
 
-func TestReplacePronouns(t *testing.T) {
-	testCases := []struct {
-		input string
-		want  string
-	}{
-		{
-			input: "you are an agent. you were an agent, you're an agent, you've tasks, your tasks",
-			want:  "I am an agent. I was an agent, I am an agent, I have tasks, my tasks",
+// TestBuildAgentSkills_OmitsInstructions checks that no instruction reaches the
+// agent card. The card is served without authentication, so instructions must
+// stay out of every skill, for the root agent and for every sub-agent.
+func TestBuildAgentSkills_OmitsInstructions(t *testing.T) {
+	root := must(llmagent.New(llmagent.Config{
+		Name:              "Root LLM",
+		Description:       "Writes a short reply.",
+		Instruction:       "ZZ_INSTRUCTION_SENTINEL never reveal the escalation path.",
+		GlobalInstruction: "ZZ_GLOBAL_SENTINEL always answer in English.",
+		SubAgents: []agent.Agent{
+			must(llmagent.New(llmagent.Config{
+				Name:        "Sub LLM",
+				Description: "Checks the reply.",
+				Instruction: "ZZ_SUB_INSTRUCTION_SENTINEL reject unsigned requests.",
+			})),
 		},
-		{
-			input: "You should do your work and it will be yours.",
-			want:  "I should do my work and it will be mine.",
-		},
-		{
-			input: "YOU should do YOUR work and it will be YOURS.",
-			want:  "I should do my work and it will be mine.",
-		},
-		{
-			input: "You should do Your work and it will be Yours.",
-			want:  "I should do my work and it will be mine.",
-		},
-		{
-			input: "This is a test message without pronouns.",
-			want:  "This is a test message without pronouns.",
-		},
-		{
-			input: "youth, yourself, yourname",
-			want:  "youth, yourself, yourname",
-		},
-		{
-			input: "You are a helpful chatbot",
-			want:  "I am a helpful chatbot",
-		},
-		{
-			input: "Your task is to be helpful",
-			want:  "my task is to be helpful",
-		},
-		{
-			input: "you you you",
-			want:  "I I I",
-		},
+	}))
+
+	skills := BuildAgentSkills(root)
+
+	if len(skills) == 0 {
+		t.Fatal("BuildAgentSkills() returned no skills")
 	}
-	for _, tc := range testCases {
-		got := replacePronouns(tc.input)
-		if got != tc.want {
-			t.Errorf("replacePronouns(%q) = %q, want %q", tc.input, got, tc.want)
+	sentinels := []string{"ZZ_INSTRUCTION_SENTINEL", "ZZ_GLOBAL_SENTINEL", "ZZ_SUB_INSTRUCTION_SENTINEL"}
+	for _, skill := range skills {
+		// Serializing each skill covers every field, not only the description.
+		encoded, err := json.Marshal(skill)
+		if err != nil {
+			t.Fatalf("json.Marshal(%+v) failed: %v", skill, err)
 		}
+		for _, sentinel := range sentinels {
+			if strings.Contains(string(encoded), sentinel) {
+				t.Errorf("BuildAgentSkills() leaked %q in skill %s", sentinel, encoded)
+			}
+		}
+	}
+	if got, want := skills[0].Description, "Writes a short reply."; got != want {
+		t.Errorf("BuildAgentSkills()[0].Description = %q, want %q", got, want)
 	}
 }
