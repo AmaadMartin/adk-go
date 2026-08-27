@@ -45,6 +45,21 @@ func (r *ArtifactsAPIRouter) Routes() Routes {
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/artifacts/{artifact_name}",
 			HandlerFunc: r.artifactsController.LoadArtifactHandler,
 		},
+		// ListArtifactVersionsMetadata must stay ahead of LoadArtifactVersion.
+		// Routes match in registration order, and "/versions/{version}" also
+		// matches "/versions/metadata".
+		Route{
+			Name:        "ListArtifactVersionsMetadata",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/artifacts/{artifact_name}/versions/metadata",
+			HandlerFunc: r.artifactsController.ListArtifactVersionsMetadataHandler,
+		},
+		Route{
+			Name:        "GetArtifactVersionMetadata",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/artifacts/{artifact_name}/versions/{version_id}/metadata",
+			HandlerFunc: r.artifactsController.GetArtifactVersionMetadataHandler,
+		},
 		Route{
 			Name:        "LoadArtifactVersion",
 			Methods:     []string{http.MethodGet},
