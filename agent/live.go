@@ -26,9 +26,7 @@ type LiveSession interface {
 
 // LiveRequest represents an incoming client event for a live session.
 type LiveRequest struct {
-	// RealtimeInput can be *genai.Blob, *genai.ActivityStart, *genai.ActivityEnd,
-	// or a *genai.LiveRealtimeInput carrying a frame the other three cannot
-	// express.
+	// RealtimeInput can be *genai.Blob, *genai.ActivityStart, or *genai.ActivityEnd.
 	RealtimeInput any
 
 	// Content represents standard text or multimodal content from the user.
@@ -56,6 +54,11 @@ type LiveRequest struct {
 	// comparable, which a map field would take away from every caller.
 	StateDelta *map[string]any
 }
+
+// LiveRequest must stay comparable: a map or slice field would remove == from
+// every caller, and only the apidiff job would notice. This stops compiling
+// first.
+var _ = map[LiveRequest]struct{}(nil)
 
 // LiveRunConfig contains options for configuring a live session.
 type LiveRunConfig struct {
