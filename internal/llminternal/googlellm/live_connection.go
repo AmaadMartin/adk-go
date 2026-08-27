@@ -189,8 +189,8 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			ActivityEnd: v,
 		})
 	case *genai.LiveRealtimeInput:
-		// A pre-built frame, so any realtime field the SDK grows stays
-		// reachable without a new case here.
+		// A pre-built frame. RunLive sends the audio-stream-end flag this way,
+		// because no dedicated genai type carries it.
 		return c.sdkSession.SendRealtimeInput(*v)
 	default:
 		return fmt.Errorf("unsupported real-time input type: %T", input)
